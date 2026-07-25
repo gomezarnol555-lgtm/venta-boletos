@@ -1,4 +1,6 @@
 streamlit
 pandas
+requests
 reportlab
 st-gsheets-connection
+mercadopago
