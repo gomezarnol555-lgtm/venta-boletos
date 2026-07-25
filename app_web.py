@@ -53,29 +53,40 @@ def generar_pdf_boleto(datos_boleto):
     return nombre_archivo
 
 def obtener_datos_gsheets():
-    """Obtiene el inventario y ventas desde Google Sheets."""
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    df_ventas = conn.read(worksheet="Ventas", usecols=list(range(7)), ttl=0)
-    df_ventas = df_ventas.dropna(how="all")
-    return conn, df_ventas
+    """Obtiene el inventario y ventas desde Google Sheets con manejo de errores detallado."""
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df_ventas = conn.read(worksheet="Ventas", ttl=0)
+        
+        if df_ventas is not None and not df_ventas.empty:
+            df_ventas = df_ventas.dropna(how="all")
+        else:
+            df_ventas = pd.DataFrame(columns=[
+                "ID_Boleto", "Nombre", "Correo", "Evento", 
+                "Numero_Boleto", "Precio", "Codigo_Pago", "Fecha_Compra"
+            ])
+            
+        return conn, df_ventas
+    except Exception as e:
+        st.error(f"⚠️ Error detallado de conexión con Google Sheets: {e}")
+        return None, None
 
 def main():
     st.set_page_config(page_title="Venta de Boletos y Asientos", page_icon="🎟️", layout="wide")
     st.title("🎟️ Sistema de Venta de Boletos y Control de Asistentes")
     
-    try:
-        conn, df_ventas = obtener_datos_gsheets()
-    except Exception:
-        st.error("⚠️ Error de conexión con Google Sheets. Asegúrate de configurar las credenciales secretas más adelante.")
+    conn, df_ventas = obtener_datos_gsheets()
+    if conn is None or df_ventas is None:
         return
 
     # --- CONFIGURACIÓN INICIAL DE BOLETOS DISPONIBLES ---
-    # Definimos 10 boletos disponibles por defecto con sus precios
     total_boletos_config = 10
     precio_base = 250.00
     
     lista_inventario = []
-    boletos_vendidos = df_ventas["Numero_Boleto"].values if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns else []
+    boletos_vendidos = []
+    if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
+        boletos_vendidos = df_ventas["Numero_Boleto"].dropna().astype(int).values
 
     for i in range(1, total_boletos_config + 1):
         estado = "Vendido ❌" if i in boletos_vendidos else "Disponible ✅"
@@ -87,17 +98,16 @@ def main():
     
     df_inventario = pd.DataFrame(lista_inventario)
 
-    # Diseño en dos columnas en pantalla
+    # Diseño en dos columnas
     col1, col2 = st.columns([1.2, 1])
 
     with col1:
         st.subheader("📋 Tabla de Disponibilidad de Boletos")
         st.dataframe(df_inventario, use_container_width=True, hide_index=True)
         
-        # Panel de Monitoreo de Ventas (Historial)
         st.markdown("---")
         st.subheader("📊 Historial de Monitoreo de Ventas")
-        if not df_ventas.empty:
+        if not df_ventas.empty and len(df_ventas.dropna(subset=["ID_Boleto"])) > 0:
             total_recaudado = df_ventas["Precio"].sum() if "Precio" in df_ventas.columns else 0
             st.metric(label="Ingresos Totales Acumulados", value=f"${total_recaudado:.2f} MXN")
             st.dataframe(df_ventas, use_container_width=True, hide_index=True)
@@ -107,7 +117,6 @@ def main():
     with col2:
         st.subheader("🛒 Formulario de Compra")
         
-        # Filtramos solo los boletos que están libres
         boletos_libres = [item["Boleto N°"] for item in lista_inventario if item["Estado"] == "Disponible ✅"]
         
         if not boletos_libres:
@@ -150,7 +159,7 @@ def main():
                         "Fecha_Compra": fecha_compra
                     }
                     
-                    # Guardar en Google Sheets (Historial y Registro)
+                    # Guardar en Google Sheets de manera segura
                     df_actualizado = pd.concat([df_ventas, pd.DataFrame([datos_nuevo_boleto])], ignore_index=True)
                     conn.update(worksheet="Ventas", data=df_actualizado)
                     
