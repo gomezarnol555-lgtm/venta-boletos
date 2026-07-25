@@ -95,7 +95,7 @@ def main():
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
         boletos_vendidos = [f"{int(x):03d}" for x in df_ventas["Numero_Boleto"].dropna().values]
 
-    # Construir mapa de disponibilidad general
+    # Construir mapa de disponibilidad general (los 100 boletos del 000 al 099)
     matriz_boletos = []
     for i in range(100):
         num_str = f"{i:03d}"
@@ -103,8 +103,8 @@ def main():
         estado_label = f"{num_str} ❌" if esta_vendido else f"{num_str} ✅"
         matriz_boletos.append(estado_label)
 
-    # DataFrame para la tabla de Disponibilidad (con nombres de columna únicos para evitar error de PyArrow)
-    columnas_unicas = [str(i) for i in range(10)]
+    # DataFrame para la tabla de Disponibilidad (mostrando las 10 filas de 000 a 099, sin indicador de columnas visible mediante nombres únicos espaciados)
+    columnas_unicas = [f"{' ' * i}" for i in range(10)]
     filas_grid = [matriz_boletos[i:i+10] for i in range(0, 100, 10)]
     df_grid = pd.DataFrame(filas_grid, columns=columnas_unicas)
 
@@ -112,8 +112,8 @@ def main():
 
     with col1:
         st.markdown("### Disponibilidad")
-        st.write("Estado actual de los 100 boletos de la rifa:")
-        st.dataframe(df_grid, use_container_width=True, height=420, hide_index=True)
+        st.write("Estado actual de todos los 100 boletos de la rifa:")
+        st.dataframe(df_grid, use_container_width=True, height=450, hide_index=True)
         st.caption("✅ = Disponible | ❌ = Vendido / No disponible")
 
     with col2:
@@ -125,9 +125,14 @@ def main():
             st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa han sido vendidos.")
             return
 
-        st.write("Selecciona tu número directamente en la tabla inferior (los ocupados aparecen tenues):")
+        # Formulario de datos con retención de información ante errores
+        nombre = st.text_input("Nombre completo:", value=st.session_state.input_nombre)
+        correo = st.text_input("Correo electrónico:", value=st.session_state.input_correo)
+        evento = st.text_input("Evento:", value="Rifa de celular", disabled=True)
+        
+        st.markdown("**Selecciona tu número de boleto (los no disponibles aparecen en color más claro y no se pueden seleccionar):**")
 
-        # Tabla interactiva de selección de boletos mediante botones en grilla (10x10)
+        # Tabla interactiva en forma de cuadrícula de 10x10 para seleccionar boletos
         selected_ticket = st.session_state.selected_ticket
         
         for fila in range(10):
@@ -139,28 +144,21 @@ def main():
                 
                 with cols_btn[col_idx]:
                     if vendido:
-                        # Botón desactivado para boletos vendidos
-                        st.button(f"{num_str}", key=f"t_{num_str}", disabled=True, use_container_width=True)
+                        # Botón deshabilitado para boletos no disponibles (aparece en tono más claro / inactivo)
+                        st.button(f"{num_str}", key=f"sel_{num_str}", disabled=True, use_container_width=True)
                     else:
                         # Botón interactivo para boletos disponibles
                         is_current = (selected_ticket == num_str)
                         label = f"[{num_str}]" if is_current else f"{num_str}"
-                        if st.button(label, key=f"t_{num_str}", use_container_width=True):
+                        if st.button(label, key=f"sel_{num_str}", use_container_width=True):
                             st.session_state.selected_ticket = num_str
                             st.rerun()
 
         if selected_ticket:
             st.success(f"🎯 Boleto seleccionado: **N° {selected_ticket}**")
         else:
-            st.info("👆 Haz clic en un número disponible de la tabla para seleccionarlo.")
+            st.info("👆 Haz clic en un número disponible de la tabla superior para seleccionarlo.")
 
-        st.markdown("---")
-
-        # Formulario de datos con retención de información ante errores
-        nombre = st.text_input("Nombre completo:", value=st.session_state.input_nombre)
-        correo = st.text_input("Correo electrónico:", value=st.session_state.input_correo)
-        evento = st.text_input("Evento:", value="Rifa de celular", disabled=True)
-        
         st.write(f"**Monto a pagar:** ${precio_base:.2f} MXN")
         
         # Métodos de pago solicitados: Transferencia y Tarjeta
@@ -176,7 +174,7 @@ def main():
 
         if submit_compra:
             if not selected_ticket:
-                st.error("⚠️ Debes seleccionar un número de boleto disponible en la tabla superior.")
+                st.error("⚠️ Debes seleccionar un número de boleto disponible.")
             elif not nombre or not correo:
                 st.error("⚠️ Por favor completa tu nombre y correo antes de continuar. Tus datos están a salvo.")
             elif not pago_realizado:
