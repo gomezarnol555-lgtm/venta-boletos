@@ -72,8 +72,6 @@ CSS_CUSTOM = """
 # -----------------------------
 # Funciones PDF y Mercado Pago
 # -----------------------------
-# (Mantenemos la misma lógica robusta que ya funcionaba)
-
 def dibujar_fondo_autenticidad(canvas, doc):
     width, height = doc.pagesize
     canvas.saveState()
@@ -125,7 +123,6 @@ def obtener_pago_mercado_pago(payment_id: str) -> Dict[str, Any]:
     respuesta = requests.get(f"https://api.mercadopago.com/v1/payments/{payment_id}", headers=mp_headers(), timeout=30)
     return respuesta.json()
 
-
 # -----------------------------
 # Google Sheets y Estados
 # -----------------------------
@@ -138,7 +135,6 @@ def asegurar_columnas(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     return df[cols]
 
 def parse_ticket_number(val: Any) -> str:
-    """Convierte de forma robusta cualquier valor (1, 1.0, '001') a formato de 3 dígitos."""
     if pd.isna(val) or str(val).strip() == "": return ""
     try: return f"{int(float(val)):03d}"
     except: return str(val).strip().zfill(3)
@@ -161,7 +157,6 @@ def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -
     # 2. Checar Ventas (Toma prioridad sobre reservas)
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
         for _, row in df_ventas.iterrows():
-            # Si el pago no dice expresamente RECHAZADO o CANCELADO, lo damos por vendido
             estado_pago = str(row.get("Estado_Pago", "")).strip().upper()
             if estado_pago not in ["RECHAZADO", "CANCELADO", "REEMBOLSADO", "PENDIENTE"]:
                 num = parse_ticket_number(row["Numero_Boleto"])
@@ -169,16 +164,27 @@ def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -
                 
     return estados
 
-def registrar_reserva_cobro(conn: GSheetsConnection, orden: Dict[str, Any]) -> bool:
+def registrar_reserva_cobro(conn: GSheetsConnection, orden: Dict[str, Any]) -> Tuple[bool, str]:
     try:
-        try: df_r = conn.read(worksheet="Reservas", ttl=0)
-        except: df_r = pd.DataFrame(columns=columnas_reservas())
+        # Intentar leer la hoja Reservas
+        try: 
+            df_r = conn.read(worksheet="Reservas", ttl=0)
+            if df_r.empty:
+                df_r = pd.DataFrame(columns=columnas_reservas())
+        except Exception: 
+            df_r = pd.DataFrame(columns=columnas_reservas())
         
+        # Limpiar datos vacíos y asegurar columnas
         df_r = asegurar_columnas(df_r.dropna(how="all"), columnas_reservas())
-        df_actualizado = pd.concat([df_r, asegurar_columnas(pd.DataFrame([orden]), columnas_reservas())], ignore_index=True)
+        df_nuevo = asegurar_columnas(pd.DataFrame([orden]), columnas_reservas())
+        
+        # Unir y actualizar
+        df_actualizado = pd.concat([df_r, df_nuevo], ignore_index=True)
         conn.update(worksheet="Reservas", data=df_actualizado)
-        return True
-    except: return False
+        
+        return True, "Éxito"
+    except Exception as e:
+        return False, str(e)
 
 
 # -----------------------------
@@ -189,7 +195,10 @@ def renderizar_mapa_interactivo():
     conn = st.connection("gsheets", type=GSheetsConnection)
     try:
         df_v = conn.read(worksheet="Ventas", ttl=5).dropna(how="all")
-        df_r = conn.read(worksheet="Reservas", ttl=5).dropna(how="all")
+        try:
+            df_r = conn.read(worksheet="Reservas", ttl=5).dropna(how="all")
+        except:
+            df_r = pd.DataFrame(columns=columnas_reservas())
     except:
         df_v, df_r = pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
 
@@ -222,14 +231,13 @@ def renderizar_mapa_interactivo():
                 elif estado == "reservado":
                     st.button(f"🟡\n{num}", disabled=True, key=f"btn_{num}", help="Reservado")
                 else:
-                    # Botón Disponible
                     is_selected = (st.session_state.get("selected_ticket") == num)
                     etiqueta = f"✅\n{num}" if is_selected else f"🟢\n{num}"
                     tipo = "primary" if is_selected else "secondary"
                     
                     if st.button(etiqueta, key=f"btn_{num}", type=tipo, help="Clic para seleccionar"):
                         st.session_state.selected_ticket = num
-                        st.rerun()  # Refresca la app para actualizar el formulario
+                        st.rerun()
 
 
 # -----------------------------
@@ -241,11 +249,10 @@ def main():
 
     if "selected_ticket" not in st.session_state: st.session_state.selected_ticket = None
 
-    # Lógica silenciosa de confirmación de pago (si regresa de Mercado Pago)
+    # Lógica de confirmación de pago
     qp = st.query_params
     if "payment_id" in qp and "status" in qp and qp["status"] == "approved":
-        st.success(f"✅ ¡Pago detectado! El registro se completará en breve (ID: {qp['payment_id']})")
-        # Aquí iría el bloque que actualiza la base de datos (omitido visualmente para enfocarnos en tu solicitud)
+        st.success(f"✅ ¡Pago detectado! (ID: {qp['payment_id']})")
         st.query_params.clear()
 
     st.title("📱 Plataforma de Boletos")
@@ -297,15 +304,19 @@ def main():
                             "Fecha_Actualizacion": fecha.strftime("%Y-%m-%d %H:%M:%S"),
                         }
 
-                        if registrar_reserva_cobro(conn, reserva):
+                        # Guardamos recibiendo el estado y el mensaje exacto de error
+                        exito, mensaje_error = registrar_reserva_cobro(conn, reserva)
+                        
+                        if exito:
                             try:
                                 pref_id, url_pago = crear_preferencia_mercado_pago(nombre, correo, telefono, ticket, precio_base, ref_externa)
                                 st.success(f"✅ ¡Boleto bloqueado! Tienes {TIEMPO_RESERVA_MINUTOS} minutos para pagar.")
                                 st.link_button("Ir a Mercado Pago ➔", url_pago, type="primary", use_container_width=True)
                             except Exception as e:
-                                st.error(f"⚠️ Error creando el pago: {e}")
+                                st.error(f"⚠️ Error creando el pago en Mercado Pago: {e}")
                         else:
-                            st.error("⚠️ No se pudo reservar el boleto. Comprueba tu conexión a Google Sheets.")
+                            # Aquí se mostrará por qué está fallando Google Sheets
+                            st.error(f"⚠️ No se pudo guardar en Google Sheets. DETALLE DEL ERROR: {mensaje_error}")
 
 if __name__ == "__main__":
     main()
