@@ -34,7 +34,7 @@ def generar_pdf_boleto(datos_boleto):
         [Paragraph("<b>N° de Boleto:</b>", estilo_normal), Paragraph(str(datos_boleto['Numero_Boleto']), estilo_normal)],
         [Paragraph("<b>Precio Pagado:</b>", estilo_normal), Paragraph(f"${datos_boleto['Precio']:.2f} MXN", estilo_normal)],
         [Paragraph("<b>Método de Pago:</b>", estilo_normal), Paragraph(str(datos_boleto['Metodo_Pago']), estilo_normal)],
-        [Paragraph("<b>Código de Pago:</b>", estilo_normal), Paragraph(datos_boleto['Codigo_Pago'], estilo_normal)],
+        [Paragraph("<b>Código de Pago:</b>", estilo_normal), Paragraph(str(datos_boleto['Codigo_Pago']), estilo_normal)],
         [Paragraph("<b>Fecha de Emisión:</b>", estilo_normal), Paragraph(str(datos_boleto['Fecha_Compra']), estilo_normal)]
     ]
     
@@ -80,11 +80,17 @@ def main():
     if conn is None or df_ventas is None:
         return
 
-    # Inicializar session_state para control de widgets y selección
+    # Inicializar session_state para control de widgets, selección y persistencia de descarga
     if "form_id" not in st.session_state:
         st.session_state.form_id = 0
     if "selected_ticket" not in st.session_state:
         st.session_state.selected_ticket = None
+    if "generated_pdf_bytes" not in st.session_state:
+        st.session_state.generated_pdf_bytes = None
+    if "generated_pdf_name" not in st.session_state:
+        st.session_state.generated_pdf_name = None
+    if "success_message" not in st.session_state:
+        st.session_state.success_message = None
 
     # --- CONFIGURACIÓN DE 100 BOLETOS (000 al 099) ---
     precio_base = 100.00 
@@ -116,6 +122,23 @@ def main():
     with col2:
         st.markdown("### 🛒 Registro de Compra")
         
+        # Mostrar panel de descarga persistente si hay un boleto recién creado
+        if st.session_state.success_message:
+            st.success(st.session_state.success_message)
+            st.download_button(
+                label="📥 Descargar Comprobante PDF del Boleto",
+                data=st.session_state.generated_pdf_bytes,
+                file_name=st.session_state.generated_pdf_name,
+                mime="application/pdf",
+                key="btn_descarga_persistente"
+            )
+            if st.button("✖️ Ocultar aviso y continuar"):
+                st.session_state.generated_pdf_bytes = None
+                st.session_state.generated_pdf_name = None
+                st.session_state.success_message = None
+                st.rerun()
+            st.markdown("---")
+
         boletos_libres_count = 100 - len(boletos_vendidos)
         if boletos_libres_count <= 0:
             st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa han sido vendidos.")
@@ -167,7 +190,7 @@ def main():
             elif not pago_realizado:
                 st.warning("⚠️ Debes marcar la casilla para confirmar que el pago fue realizado.")
             else:
-                with st.spinner('Procesando pago y actualizando inventario en la nube...'):
+                with st.spinner('Procesando pago, generando PDF y guardando en Google Sheets...'):
                     id_boleto = f"RIFA-{int(datetime.now().timestamp())}"
                     codigo_pago = f"PAY-{random.randint(10000, 99999)}"
                     fecha_compra = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -203,25 +226,16 @@ def main():
                     # Generar PDF oficial
                     archivo_pdf = generar_pdf_boleto(datos_nuevo_boleto)
 
-                st.success("✅ ¡Registro completado y guardado exitosamente!")
-                st.info(f"Tu código de pago asignado: **{codigo_pago}**")
+                    # Guardar bytes del PDF en session_state para que la descarga sea persistente
+                    with open(archivo_pdf, "rb") as pdf_file:
+                        st.session_state.generated_pdf_bytes = pdf_file.read()
+                    st.session_state.generated_pdf_name = archivo_pdf
+                    st.session_state.success_message = f"✅ ¡Registro completado! Código de pago asignado: **{codigo_pago}**"
                 
-                with open(archivo_pdf, "rb") as pdf_file:
-                    pdf_bytes = pdf_file.read()
-                    
-                st.download_button(
-                    label="📥 Descargar Comprobante PDF",
-                    data=pdf_bytes,
-                    file_name=archivo_pdf,
-                    mime="application/pdf",
-                    key="btn_descarga"
-                )
-                
-                # Incrementar form_id para resetear celdas y limpiar selección automáticamente
+                # Incrementar form_id para vaciar los campos y limpiar selección para el siguiente usuario
                 st.session_state.form_id += 1
                 st.session_state.selected_ticket = None
                 
-                # Recargar de inmediato la aplicación para reflejar cambios en la tabla y campos limpios
                 st.rerun()
 
 if __name__ == "__main__":
