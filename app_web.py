@@ -9,7 +9,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from streamlit_gsheets import GSheetsConnection
 
 def generar_pdf_boleto(datos_boleto):
-    nombre_archivo = f"Boleto_{datos_boleto['ID_Boleto']}.pdf"
+    nombre_archivo = datos_boleto['Comprobante']
     doc = SimpleDocTemplate(nombre_archivo, pagesize=letter)
     story = []
     
@@ -64,7 +64,7 @@ def obtener_datos_gsheets():
         else:
             df_ventas = pd.DataFrame(columns=[
                 "ID_Boleto", "Nombre", "Correo", "Evento", 
-                "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra"
+                "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra", "Comprobante"
             ])
             
         return conn, df_ventas
@@ -121,7 +121,7 @@ def main():
             st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa han sido vendidos.")
             return
 
-        # Widgets con clave dinámica basada en form_id para vaciarse al incrementar el ID
+        # Widgets con clave dinámica basada en form_id para vaciarse automáticamente
         nombre = st.text_input("Nombre completo:", key=f"nombre_{st.session_state.form_id}")
         correo = st.text_input("Correo electrónico:", key=f"correo_{st.session_state.form_id}")
         evento = st.text_input("Evento:", value="Rifa de celular", disabled=True, key=f"evento_{st.session_state.form_id}")
@@ -171,6 +171,7 @@ def main():
                     id_boleto = f"RIFA-{int(datetime.now().timestamp())}"
                     codigo_pago = f"PAY-{random.randint(10000, 99999)}"
                     fecha_compra = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    nombre_archivo_pdf = f"Boleto_{id_boleto}.pdf"
                     
                     datos_nuevo_boleto = {
                         "ID_Boleto": id_boleto,
@@ -181,10 +182,11 @@ def main():
                         "Precio": float(precio_base),
                         "Metodo_Pago": metodo_pago,
                         "Codigo_Pago": codigo_pago,
-                        "Fecha_Compra": fecha_compra
+                        "Fecha_Compra": fecha_compra,
+                        "Comprobante": nombre_archivo_pdf
                     }
                     
-                    columnas_estandar = ["ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra"]
+                    columnas_estandar = ["ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra", "Comprobante"]
                     df_nuevo_registro = pd.DataFrame([datos_nuevo_boleto])
                     
                     if df_ventas.empty:
