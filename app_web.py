@@ -173,18 +173,24 @@ def obtener_pago_mercado_pago(payment_id: str) -> Dict[str, Any]:
 # -----------------------------
 # Google Sheets y Estados
 # -----------------------------
-def columnas_ventas() -> list: return ["ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra", "Numero_Telefonico", "Estado_Pago", "Referencia_Pago", "MercadoPago_Payment_ID", "MercadoPago_Preference_ID"]
-def columnas_reservas() -> list: return ["External_Reference", "MercadoPago_Preference_ID", "MercadoPago_Payment_ID", "Numero_Boleto", "Nombre", "Correo", "Numero_Telefonico", "Monto", "Estado_Reserva", "Fecha_Creacion", "Expira_En", "Fecha_Actualizacion"]
+def columnas_ventas() -> list: 
+    return ["ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra", "Numero_Telefonico", "Estado_Pago", "Referencia_Pago", "MercadoPago_Payment_ID", "MercadoPago_Preference_ID"]
+
+def columnas_reservas() -> list: 
+    return ["External_Reference", "MercadoPago_Preference_ID", "MercadoPago_Payment_ID", "Numero_Boleto", "Nombre", "Correo", "Numero_Telefonico", "Monto", "Estado_Reserva", "Fecha_Creacion", "Expira_En", "Fecha_Actualizacion"]
 
 def asegurar_columnas(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     for col in cols:
-        if col not in df.columns: df[col] = ""
+        if col not in df.columns: 
+            df[col] = ""
     return df[cols]
 
 def parse_ticket_number(val: Any) -> str:
     if pd.isna(val) or str(val).strip() == "": return ""
-    try: return f"{int(float(val)):03d}"
-    except: return str(val).strip().zfill(3)
+    try: 
+        return f"{int(float(val)):03d}"
+    except: 
+        return str(val).strip().zfill(3)
 
 def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -> dict:
     estados = {}
@@ -194,12 +200,15 @@ def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -
         for _, row in df_reservas.iterrows():
             if str(row.get("Estado_Reserva", "")).strip().upper() == "PENDIENTE":
                 expira_str = row.get("Expira_En")
-                try: expira = pd.to_datetime(str(expira_str)).to_pydatetime()
-                except: expira = None
+                try: 
+                    expira = pd.to_datetime(str(expira_str)).to_pydatetime()
+                except: 
+                    expira = None
                 
                 if expira is None or datetime.now() <= expira:
                     num = parse_ticket_number(row["Numero_Boleto"])
-                    if num: estados[num] = "reservado"
+                    if num: 
+                        estados[num] = "reservado"
 
     # 2. Checar Ventas (Toma prioridad sobre reservas)
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
@@ -207,7 +216,8 @@ def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -
             estado_pago = str(row.get("Estado_Pago", "")).strip().upper()
             if estado_pago not in ["RECHAZADO", "CANCELADO", "REEMBOLSADO", "PENDIENTE"]:
                 num = parse_ticket_number(row["Numero_Boleto"])
-                if num: estados[num] = "vendido"
+                if num: 
+                    estados[num] = "vendido"
                 
     return estados
 
@@ -239,10 +249,15 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
         estado_pago = payment_info.get("status", "")
         pago_id = str(payment_info.get("id", ""))
         
-        try: df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
-        except: df_r = pd.DataFrame(columns=columnas_reservas())
-        try: df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
-        except: df_v = pd.DataFrame(columns=columnas_ventas())
+        try: 
+            df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
+        except: 
+            df_r = pd.DataFrame(columns=columnas_reservas())
+            
+        try: 
+            df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
+        except: 
+            df_v = pd.DataFrame(columns=columnas_ventas())
         
         df_r = asegurar_columnas(df_r, columnas_reservas())
         df_v = asegurar_columnas(df_v, columnas_ventas())
@@ -373,7 +388,8 @@ def main():
     st.set_page_config(page_title="Rifa de Celular", page_icon="🎟️", layout="wide")
     st.markdown(CSS_CUSTOM, unsafe_allow_html=True)
 
-    if "selected_ticket" not in st.session_state: st.session_state.selected_ticket = None
+    if "selected_ticket" not in st.session_state: 
+        st.session_state.selected_ticket = None
 
     conn = st.connection("gsheets", type=GSheetsConnection)
 
