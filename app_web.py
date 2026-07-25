@@ -80,11 +80,9 @@ def main():
     if conn is None or df_ventas is None:
         return
 
-    # Inicializar session_state para los campos editables
-    if "input_nombre" not in st.session_state:
-        st.session_state.input_nombre = ""
-    if "input_correo" not in st.session_state:
-        st.session_state.input_correo = ""
+    # Inicializar session_state para control de widgets y selección
+    if "form_id" not in st.session_state:
+        st.session_state.form_id = 0
     if "selected_ticket" not in st.session_state:
         st.session_state.selected_ticket = None
 
@@ -103,7 +101,7 @@ def main():
         estado_label = f"{num_str} ❌" if esta_vendido else f"{num_str} ✅"
         matriz_boletos.append(estado_label)
 
-    # DataFrame para la tabla de Disponibilidad (mostrando las 10 filas de 000 a 099, sin indicador de columnas visible mediante nombres únicos espaciados)
+    # DataFrame para la tabla de Disponibilidad
     columnas_unicas = [f"{' ' * i}" for i in range(10)]
     filas_grid = [matriz_boletos[i:i+10] for i in range(0, 100, 10)]
     df_grid = pd.DataFrame(filas_grid, columns=columnas_unicas)
@@ -125,10 +123,10 @@ def main():
             st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa han sido vendidos.")
             return
 
-        # Campos editables usando keys vinculados a session_state para limpiar correctamente
-        nombre = st.text_input("Nombre completo:", key="input_nombre")
-        correo = st.text_input("Correo electrónico:", key="input_correo")
-        evento = st.text_input("Evento:", value="Rifa de celular", disabled=True)
+        # Widgets con clave dinámica basada en form_id para permitir reseteo limpio sin errores
+        nombre = st.text_input("Nombre completo:", key=f"nombre_{st.session_state.form_id}")
+        correo = st.text_input("Correo electrónico:", key=f"correo_{st.session_state.form_id}")
+        evento = st.text_input("Evento:", value="Rifa de celular", disabled=True, key=f"evento_{st.session_state.form_id}")
         
         selected_ticket = st.session_state.selected_ticket
 
@@ -160,9 +158,9 @@ def main():
         st.write(f"**Monto a pagar:** ${precio_base:.2f} MXN")
         
         # Métodos de pago solicitados: Transferencia y Tarjeta
-        metodo_pago = st.radio("Método de Pago:", ["Transferencia", "Tarjeta"], key="metodo_pago")
+        metodo_pago = st.radio("Método de Pago:", ["Transferencia", "Tarjeta"], key=f"pago_{st.session_state.form_id}")
         
-        pago_realizado = st.checkbox("Confirmo que el pago ha sido efectuado correctamente.", key="chk_pago")
+        pago_realizado = st.checkbox("Confirmo que el pago ha sido efectuado correctamente.", key=f"chk_{st.session_state.form_id}")
         
         submit_compra = st.button("💳 Registrar Compra y Generar Boleto")
 
@@ -183,7 +181,7 @@ def main():
                         "ID_Boleto": id_boleto,
                         "Nombre": nombre,
                         "Correo": correo,
-                        "Evento": evento,
+                        "Evento": "Rifa de celular",
                         "Numero_Boleto": str(selected_ticket),
                         "Precio": float(precio_base),
                         "Metodo_Pago": metodo_pago,
@@ -191,8 +189,18 @@ def main():
                         "Fecha_Compra": fecha_compra
                     }
                     
-                    # Actualizar hoja de cálculo en Google Sheets
-                    df_actualizado = pd.concat([df_ventas, pd.DataFrame([datos_nuevo_boleto])], ignore_index=True)
+                    columnas_estandar = ["ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra"]
+                    df_nuevo_registro = pd.DataFrame([datos_nuevo_boleto])
+                    
+                    if df_ventas.empty:
+                        df_actualizado = df_nuevo_registro
+                    else:
+                        for col in columnas_estandar:
+                            if col not in df_ventas.columns:
+                                df_ventas[col] = ""
+                        df_ventas = df_ventas[columnas_estandar]
+                        df_actualizado = pd.concat([df_ventas, df_nuevo_registro[columnas_estandar]], ignore_index=True)
+
                     conn.update(worksheet="Ventas", data=df_actualizado)
                     
                     # Generar PDF oficial
@@ -212,13 +220,13 @@ def main():
                     key="btn_descarga"
                 )
                 
-                # Vaciar campos editables y selección para un nuevo registro
-                st.session_state.input_nombre = ""
-                st.session_state.input_correo = ""
+                # Incrementar form_id para vaciar los campos de texto sin error de Streamlit y limpiar selección
+                st.session_state.form_id += 1
                 st.session_state.selected_ticket = None
                 
                 st.success("🔄 *Los campos se han limpiado y las tablas se han actualizado para un nuevo registro.*")
-                st.rerun()
+                if st.button("🔄 Continuar con otro registro"):
+                    st.rerun()
 
 if __name__ == "__main__":
     main()
