@@ -103,10 +103,10 @@ def main():
         estado_label = f"{num_str} ❌" if esta_vendido else f"{num_str} ✅"
         matriz_boletos.append(estado_label)
 
-    # DataFrame para la tabla de Disponibilidad (sin encabezados genéricos)
-    columnas_vacias = ["" for _ in range(10)]
+    # DataFrame para la tabla de Disponibilidad (con nombres de columna únicos para evitar error de PyArrow)
+    columnas_unicas = [str(i) for i in range(10)]
     filas_grid = [matriz_boletos[i:i+10] for i in range(0, 100, 10)]
-    df_grid = pd.DataFrame(filas_grid, columns=columnas_vacias)
+    df_grid = pd.DataFrame(filas_grid, columns=columnas_unicas)
 
     col1, col2 = st.columns([1.2, 1])
 
