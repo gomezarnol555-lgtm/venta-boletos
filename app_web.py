@@ -1,4 +1,3 @@
-import mercadopago
 import os
 import random
 from datetime import datetime, timedelta
@@ -12,6 +11,9 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from streamlit_gsheets import GSheetsConnection
+
+# SDK de Mercado Pago
+import mercadopago
 
 # -----------------------------
 # Configuración del Sistema
@@ -33,7 +35,7 @@ MP_NOTIFICATION_URL = obtener_config("MP_NOTIFICATION_URL")
 MP_RETURN_URL = obtener_config("MP_RETURN_URL")
 MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
 
-# Agrega credenciales e inicializa la biblioteca de Mercado Pago Server-Side
+# Agrega credenciales - Inicializar biblioteca de Mercado Pago Server-Side
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 # -----------------------------
@@ -113,15 +115,35 @@ def mp_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {MP_ACCESS_TOKEN}", "Content-Type": "application/json"}
 
 def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, monto, external_reference):
-    payload = {
-        "items": [{"title": f"Rifa celular - Boleto {numero_boleto}", "quantity": 1, "unit_price": float(monto), "currency_id": MP_CURRENCY_ID}],
-        "payer": {"name": nombre, "email": correo},
+    # Estructura requerida por el SDK de Mercado Pago manteniendo tu configuración
+    preference_data = {
+        "items": [
+            {
+                "title": f"Rifa celular - Boleto {numero_boleto}",
+                "quantity": 1,
+                "unit_price": float(monto),
+                "currency_id": MP_CURRENCY_ID
+            }
+        ],
+        "payer": {
+            "name": nombre,
+            "email": correo
+        },
         "external_reference": external_reference,
-        "back_urls": {"success": MP_RETURN_URL, "pending": MP_RETURN_URL, "failure": MP_RETURN_URL},
+        "back_urls": {
+            "success": MP_RETURN_URL,
+            "pending": MP_RETURN_URL,
+            "failure": MP_RETURN_URL
+        },
         "auto_return": "approved",
     }
-    respuesta = requests.post("https://api.mercadopago.com/checkout/preferences", headers=mp_headers(), json=payload, timeout=30)
-    return respuesta.json().get("id", ""), respuesta.json().get("init_point", "")
+    
+    # Se genera la preferencia usando el método oficial del SDK
+    preference_response = sdk.preference().create(preference_data)
+    preference = preference_response["response"]
+    
+    # Se retorna el identificador único y el punto de inicio de pago (mantiene tu lógica)
+    return preference.get("id", ""), preference.get("init_point", "")
 
 def obtener_pago_mercado_pago(payment_id: str) -> Dict[str, Any]:
     respuesta = requests.get(f"https://api.mercadopago.com/v1/payments/{payment_id}", headers=mp_headers(), timeout=30)
