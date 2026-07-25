@@ -422,7 +422,7 @@ def main():
 
     with col_form:
         st.subheader("🛒 Finalizar Compra")
-        precio_base = 100.00
+        precio_base = 1.00
         
         ticket = st.session_state.selected_ticket
         
