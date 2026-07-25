@@ -116,7 +116,6 @@ def mp_headers() -> Dict[str, str]:
 
 # Adaptación para soportar Deep Linking si se consume desde una App Móvil nativa
 def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, monto, external_reference, custom_return_scheme: Optional[str] = None):
-    # En apps móviles (Flutter/React Native/iOS/Android), el return_url suele ser un esquema deep link (ej. "rifaapp://checkout")
     url_retorno = custom_return_scheme if custom_return_scheme else MP_RETURN_URL
     
     preference_data = {
@@ -138,19 +137,17 @@ def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, mont
             "pending": url_retorno,
             "failure": url_retorno
         },
+        "notification_url": MP_NOTIFICATION_URL, # Se adjunta la URL donde Mercado Pago enviará el webhook
         "auto_return": "approved",
     }
     
-    # Creación de preferencia usando el SDK oficial
     preference_response = sdk.preference().create(preference_data)
     preference = preference_response["response"]
-    
-    # Retorna tanto el ID (para Apps Móviles) como la URL web (para navegadores)
     return preference.get("id", ""), preference.get("init_point", "")
 
 def obtener_pago_mercado_pago(payment_id: str) -> Dict[str, Any]:
-    respuesta = requests.get(f"https://api.mercadopago.com/v1/payments/{payment_id}", headers=mp_headers(), timeout=30)
-    return respuesta.json()
+    payment_response = sdk.payment().get(payment_id)
+    return payment_response["response"]
 
 # -----------------------------
 # Google Sheets y Estados
@@ -211,6 +208,103 @@ def registrar_reserva_cobro(conn: GSheetsConnection, orden: Dict[str, Any]) -> T
         return True, "Éxito"
     except Exception as e:
         return False, str(e)
+
+# -------------------------------------------------------------
+# Motor de Notificaciones (Webhooks / IPN) Mercado Pago
+# -------------------------------------------------------------
+def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, Any]) -> bool:
+    """Actualiza Google Sheets convirtiendo una reserva pendiente en venta confirmada."""
+    try:
+        ext_ref = payment_info.get("external_reference", "")
+        estado_pago = payment_info.get("status", "")
+        pago_id = str(payment_info.get("id", ""))
+        
+        # 1. Leer hojas actuales
+        try: df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
+        except: df_r = pd.DataFrame(columns=columnas_reservas())
+        try: df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
+        except: df_v = pd.DataFrame(columns=columnas_ventas())
+        
+        df_r = asegurar_columnas(df_r, columnas_reservas())
+        df_v = asegurar_columnas(df_v, columnas_ventas())
+        
+        # 2. Si el pago fue aprobado, buscar la reserva asociada y crear la venta
+        if estado_pago == "approved" and not df_r.empty:
+            filtro_reserva = df_r["External_Reference"] == ext_ref
+            if filtro_reserva.any():
+                reserva = df_r[filtro_reserva].iloc[0]
+                
+                # Actualizar el estado en la hoja de Reservas
+                df_r.loc[filtro_reserva, "Estado_Reserva"] = "PAGADO"
+                df_r.loc[filtro_reserva, "MercadoPago_Payment_ID"] = pago_id
+                conn.update(worksheet="Reservas", data=df_r)
+                
+                # Crear el registro en la hoja de Ventas para que el boleto cambie a color Rojo
+                nueva_venta = {
+                    "ID_Boleto": f"BOL-{random.randint(10000, 99999)}",
+                    "Nombre": reserva["Nombre"],
+                    "Correo": reserva["Correo"],
+                    "Evento": "Rifa de Celular",
+                    "Numero_Boleto": reserva["Numero_Boleto"],
+                    "Precio": reserva["Monto"],
+                    "Metodo_Pago": payment_info.get("payment_type_id", "mercadopago"),
+                    "Codigo_Pago": pago_id,
+                    "Fecha_Compra": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Numero_Telefonico": reserva["Numero_Telefonico"],
+                    "Estado_Pago": "APROBADO",
+                    "Referencia_Pago": ext_ref,
+                    "MercadoPago_Payment_ID": pago_id,
+                    "MercadoPago_Preference_ID": reserva["MercadoPago_Preference_ID"]
+                }
+                df_v_actualizado = pd.concat([df_v, pd.DataFrame([nueva_venta])], ignore_index=True)
+                conn.update(worksheet="Ventas", data=df_v_actualizado)
+                return True
+        return False
+    except Exception as e:
+        st.error(f"Error procesando el registro en hojas: {e}")
+        return False
+
+def procesar_notificacion_mercadopago(payload: Dict[str, Any], conn: GSheetsConnection) -> Optional[Dict[str, Any]]:
+    """
+    Procesa las notificaciones webhooks siguiendo exactamente la estructura oficial del SDK.
+    """
+    try:
+        # Estructura de extracción compatible con payloads directos o encapsulados en 'data'
+        data = payload if "type" in payload else payload.get("data", {})
+        notification_type = payload.get("type", data.get("type", ""))
+        
+        # Estructura condicional exacta solicitada para el SDK
+        if notification_type == "payment":
+            payment_id = payload.get("data", {}).get("id") or payload.get("id")
+            if not payment_id:
+                return None
+            payment = sdk.payment().get(payment_id)
+            payment_data = payment.get("response", {})
+            
+            # Si el pago está aprobado en MP, actualizar Google Sheets
+            if payment_data.get("status") == "approved":
+                actualizar_pago_en_hojas(conn, payment_data)
+            return payment_data
+            
+        elif notification_type == "plan":
+            plan = sdk.preapproval().get(payload["data"]["id"])
+            return plan.get("response", {})
+            
+        elif notification_type == "subscription":
+            subscription = sdk.preapproval().get(payload["data"]["id"])
+            return subscription.get("response", {})
+            
+        elif notification_type == "invoice":
+            invoice = sdk.invoice().get(payload["data"]["id"])
+            return invoice.get("response", {})
+            
+        elif notification_type == "point_integration_wh":
+            # Contiene la información relacionada a la notificación.
+            return payload
+        else:
+            return None
+    except Exception as e:
+        return None
 
 
 # -----------------------------
@@ -274,9 +368,26 @@ def main():
 
     if "selected_ticket" not in st.session_state: st.session_state.selected_ticket = None
 
+    conn = st.connection("gsheets", type=GSheetsConnection)
+
+    # 1. Lógica de escucha automática para Webhooks e IPN que lleguen por URL (Query Params)
     qp = st.query_params
+    if ("type" in qp or "topic" in qp) and ("id" in qp or "data.id" in qp):
+        notif_type = qp.get("type", qp.get("topic"))
+        notif_id = qp.get("id", qp.get("data.id"))
+        payload_notif = {"type": notif_type, "data": {"id": notif_id}}
+        
+        with st.spinner("Procesando notificación de Mercado Pago..."):
+            res_notif = procesar_notificacion_mercadopago(payload_notif, conn)
+            if res_notif and res_notif.get("status") == "approved":
+                st.success(f"⚡ ¡WebHook procesado! El pago {notif_id} fue aprobado y el boleto ya está registrado en Ventas.")
+                st.query_params.clear()
+
+    # 2. Lógica tradicional de retorno de pago web (URL de éxito)
     if "payment_id" in qp and "status" in qp and qp["status"] == "approved":
-        st.success(f"✅ ¡Pago detectado! (ID: {qp['payment_id']})")
+        # Aseguramos por si el Webhook no llegó más rápido que el usuario al redirigirse
+        procesar_notificacion_mercadopago({"type": "payment", "data": {"id": qp["payment_id"]}}, conn)
+        st.success(f"✅ ¡Pago detectado y confirmado! (ID: {qp['payment_id']})")
         st.query_params.clear()
 
     st.title("📱 Plataforma de Boletos")
@@ -303,7 +414,6 @@ def main():
                 correo = st.text_input("Correo electrónico:")
                 telefono = st.text_input("Número de WhatsApp / Celular:")
                 
-                # Checkbox opcional por si el usuario quiere probar la lógica de retorno de un frontend móvil (Deep Linking)
                 is_mobile_app = st.checkbox("📲 ¿Es una orden desde App Móvil? (Deep Link)", value=False)
                 custom_scheme = st.text_input("Esquema de la app (ej: miapp://checkout):", value="rifaapp://pago") if is_mobile_app else None
                 
@@ -313,7 +423,6 @@ def main():
                     if not nombre or not correo or not telefono:
                         st.error("⚠️ Completa tus datos para continuar.")
                     else:
-                        conn = st.connection("gsheets", type=GSheetsConnection)
                         ref_externa = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{ticket}"
                         fecha = datetime.now()
                         
@@ -339,7 +448,6 @@ def main():
                                 pref_id, url_pago = crear_preferencia_mercado_pago(nombre, correo, telefono, ticket, precio_base, ref_externa, custom_scheme)
                                 st.success(f"✅ ¡Boleto bloqueado! Tienes {TIEMPO_RESERVA_MINUTOS} minutos para pagar.")
                                 
-                                # Separación clara entre el consumo Web y la integración con Aplicaciones Móviles
                                 tab_web, tab_movil = st.tabs(["🌐 Pago Web (Navegador)", "📲 Integración App Móvil"])
                                 
                                 with tab_web:
@@ -348,21 +456,26 @@ def main():
                                     
                                 with tab_movil:
                                     st.markdown("### Configuración para Frontend Móvil")
-                                    st.write("Para **Flutter**, **React Native** (CLI/Expo), **Android** (Kotlin/Java) o **iOS** (Swift), **no** utilices el enlace web. En tu aplicación, inicia el SDK enviando este **ID de Preferencia**:")
+                                    st.write("En tu aplicación (Flutter, React Native, iOS, Android), inicia el SDK nativo enviando este **ID de Preferencia**:")
                                     st.code(pref_id, language="text")
                                     
-                                    with st.expander("🛠️ Ver cómo usar este ID en tu código de Frontend Móvil"):
-                                        st.markdown("**React Native / Expo / Flutter:**")
-                                        st.code(f'// Al recibir el ID desde este servidor:\nstartCheckout({{ preferenceId: "{pref_id}" }});', language="javascript")
-                                        st.markdown("**Android (Kotlin/Java):**")
-                                        st.code(f'// Iniciar Checkout nativo con el ID:\nMercadoPagoCheckout.Builder("TU_PUBLIC_KEY", "{pref_id}").build().startPayment(this, REQUEST_CODE)', language="kotlin")
-                                        st.markdown("**iOS (Swift):**")
-                                        st.code(f'// Iniciar Checkout nativo con el ID:\nlet checkout = MercadoPagoCheckout(builder: MercadoPagoCheckoutBuilder(publicKey: "TU_PUBLIC_KEY", preferenceId: "{pref_id}"))\ncheckout.start(navigationController: self.navigationController!)', language="swift")
-                                        
                             except Exception as e:
                                 st.error(f"⚠️ Error creando el pago en Mercado Pago: {e}")
                         else:
                             st.error(f"⚠️ No se pudo guardar en Google Sheets. DETALLE DEL ERROR: {mensaje_error}")
+
+        # Herramienta oculta/colapsable para simular el Webhook si estás haciendo pruebas locales
+        with st.expander("🛠️ Simulador de Webhook / Notificación (Para Pruebas)"):
+            st.caption("Usa esta herramienta si estás desarrollando localmente y quieres simular que Mercado Pago te envió una notificación de pago aprobado.")
+            test_payment_id = st.text_input("ID de Pago en Mercado Pago para simular:")
+            if st.button("Simular WebHook de Pago", type="secondary"):
+                if test_payment_id:
+                    res_test = procesar_notificacion_mercadopago({"type": "payment", "data": {"id": test_payment_id}}, conn)
+                    if res_test:
+                        st.json(res_test)
+                        st.rerun()
+                else:
+                    st.warning("Ingresa un ID de pago válido.")
 
 if __name__ == "__main__":
     main()
