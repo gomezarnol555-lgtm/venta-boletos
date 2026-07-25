@@ -35,7 +35,7 @@ MP_NOTIFICATION_URL = obtener_config("MP_NOTIFICATION_URL")
 MP_RETURN_URL = obtener_config("MP_RETURN_URL")
 MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
 
-# Agrega credenciales - Inicializar biblioteca de Mercado Pago Server-Side
+# Inicializar biblioteca de Mercado Pago Server-Side
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 # -----------------------------
@@ -111,10 +111,6 @@ def generar_pdf_boleto(datos_boleto: Dict[str, Any]) -> str:
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
 
-def mp_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {MP_ACCESS_TOKEN}", "Content-Type": "application/json"}
-
-# Adaptación para soportar Deep Linking si se consume desde una App Móvil nativa
 def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, monto, external_reference, custom_return_scheme: Optional[str] = None):
     url_retorno = custom_return_scheme if custom_return_scheme else MP_RETURN_URL
     
@@ -132,22 +128,34 @@ def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, mont
             "email": correo
         },
         "external_reference": external_reference,
-        "back_urls": {
+    }
+    
+    # Previene rechazos si la URL de retorno está vacía en modo local
+    if url_retorno:
+        preference_data["back_urls"] = {
             "success": url_retorno,
             "pending": url_retorno,
             "failure": url_retorno
-        },
-        "notification_url": MP_NOTIFICATION_URL, # Se adjunta la URL donde Mercado Pago enviará el webhook
-        "auto_return": "approved",
-    }
+        }
+        preference_data["auto_return"] = "approved"
+        
+    if MP_NOTIFICATION_URL:
+        preference_data["notification_url"] = MP_NOTIFICATION_URL
     
     preference_response = sdk.preference().create(preference_data)
-    preference = preference_response["response"]
-    return preference.get("id", ""), preference.get("init_point", "")
+    preference = preference_response.get("response", {})
+    
+    if "id" not in preference:
+        error_msg = preference.get("message", "Error desconocido o Access Token inválido en Mercado Pago")
+        raise Exception(f"Rechazado por MP: {error_msg}")
+        
+    # Extrae de forma segura el link en Producción o en Modo Sandbox (Pruebas)
+    url_pago = preference.get("init_point") or preference.get("sandbox_init_point", "")
+    return preference.get("id", ""), url_pago
 
 def obtener_pago_mercado_pago(payment_id: str) -> Dict[str, Any]:
     payment_response = sdk.payment().get(payment_id)
-    return payment_response["response"]
+    return payment_response.get("response", {})
 
 # -----------------------------
 # Google Sheets y Estados
@@ -213,13 +221,11 @@ def registrar_reserva_cobro(conn: GSheetsConnection, orden: Dict[str, Any]) -> T
 # Motor de Notificaciones (Webhooks / IPN) Mercado Pago
 # -------------------------------------------------------------
 def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, Any]) -> bool:
-    """Actualiza Google Sheets convirtiendo una reserva pendiente en venta confirmada."""
     try:
         ext_ref = payment_info.get("external_reference", "")
         estado_pago = payment_info.get("status", "")
         pago_id = str(payment_info.get("id", ""))
         
-        # 1. Leer hojas actuales
         try: df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
         except: df_r = pd.DataFrame(columns=columnas_reservas())
         try: df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
@@ -228,18 +234,15 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
         df_r = asegurar_columnas(df_r, columnas_reservas())
         df_v = asegurar_columnas(df_v, columnas_ventas())
         
-        # 2. Si el pago fue aprobado, buscar la reserva asociada y crear la venta
         if estado_pago == "approved" and not df_r.empty:
             filtro_reserva = df_r["External_Reference"] == ext_ref
             if filtro_reserva.any():
                 reserva = df_r[filtro_reserva].iloc[0]
                 
-                # Actualizar el estado en la hoja de Reservas
                 df_r.loc[filtro_reserva, "Estado_Reserva"] = "PAGADO"
                 df_r.loc[filtro_reserva, "MercadoPago_Payment_ID"] = pago_id
                 conn.update(worksheet="Reservas", data=df_r)
                 
-                # Crear el registro en la hoja de Ventas para que el boleto cambie a color Rojo
                 nueva_venta = {
                     "ID_Boleto": f"BOL-{random.randint(10000, 99999)}",
                     "Nombre": reserva["Nombre"],
@@ -265,15 +268,10 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
         return False
 
 def procesar_notificacion_mercadopago(payload: Dict[str, Any], conn: GSheetsConnection) -> Optional[Dict[str, Any]]:
-    """
-    Procesa las notificaciones webhooks siguiendo exactamente la estructura oficial del SDK.
-    """
     try:
-        # Estructura de extracción compatible con payloads directos o encapsulados en 'data'
         data = payload if "type" in payload else payload.get("data", {})
         notification_type = payload.get("type", data.get("type", ""))
         
-        # Estructura condicional exacta solicitada para el SDK
         if notification_type == "payment":
             payment_id = payload.get("data", {}).get("id") or payload.get("id")
             if not payment_id:
@@ -281,7 +279,6 @@ def procesar_notificacion_mercadopago(payload: Dict[str, Any], conn: GSheetsConn
             payment = sdk.payment().get(payment_id)
             payment_data = payment.get("response", {})
             
-            # Si el pago está aprobado en MP, actualizar Google Sheets
             if payment_data.get("status") == "approved":
                 actualizar_pago_en_hojas(conn, payment_data)
             return payment_data
@@ -299,13 +296,11 @@ def procesar_notificacion_mercadopago(payload: Dict[str, Any], conn: GSheetsConn
             return invoice.get("response", {})
             
         elif notification_type == "point_integration_wh":
-            # Contiene la información relacionada a la notificación.
             return payload
         else:
             return None
-    except Exception as e:
+    except Exception:
         return None
-
 
 # -----------------------------
 # Dashboard en Vivo y Clicable
@@ -358,7 +353,6 @@ def renderizar_mapa_interactivo():
                         st.session_state.selected_ticket = num
                         st.rerun()
 
-
 # -----------------------------
 # Interfaz Principal
 # -----------------------------
@@ -370,7 +364,7 @@ def main():
 
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    # 1. Lógica de escucha automática para Webhooks e IPN que lleguen por URL (Query Params)
+    # 1. Escucha de Webhooks o Retornos IPN por Query Params
     qp = st.query_params
     if ("type" in qp or "topic" in qp) and ("id" in qp or "data.id" in qp):
         notif_type = qp.get("type", qp.get("topic"))
@@ -380,12 +374,11 @@ def main():
         with st.spinner("Procesando notificación de Mercado Pago..."):
             res_notif = procesar_notificacion_mercadopago(payload_notif, conn)
             if res_notif and res_notif.get("status") == "approved":
-                st.success(f"⚡ ¡WebHook procesado! El pago {notif_id} fue aprobado y el boleto ya está registrado en Ventas.")
+                st.success(f"⚡ ¡WebHook procesado! El pago {notif_id} fue aprobado y registrado exitosamente.")
                 st.query_params.clear()
 
-    # 2. Lógica tradicional de retorno de pago web (URL de éxito)
+    # 2. Retorno tradicional de éxito desde la pasarela web
     if "payment_id" in qp and "status" in qp and qp["status"] == "approved":
-        # Aseguramos por si el Webhook no llegó más rápido que el usuario al redirigirse
         procesar_notificacion_mercadopago({"type": "payment", "data": {"id": qp["payment_id"]}}, conn)
         st.success(f"✅ ¡Pago detectado y confirmado! (ID: {qp['payment_id']})")
         st.query_params.clear()
@@ -446,27 +439,38 @@ def main():
                         if exito:
                             try:
                                 pref_id, url_pago = crear_preferencia_mercado_pago(nombre, correo, telefono, ticket, precio_base, ref_externa, custom_scheme)
-                                st.success(f"✅ ¡Boleto bloqueado! Tienes {TIEMPO_RESERVA_MINUTOS} minutos para pagar.")
                                 
-                                tab_web, tab_movil = st.tabs(["🌐 Pago Web (Navegador)", "📲 Integración App Móvil"])
-                                
-                                with tab_web:
-                                    st.write("Si estás en un navegador tradicional, haz clic en el siguiente botón:")
-                                    st.link_button("Ir a Mercado Pago ➔", url_pago, type="primary", use_container_width=True)
+                                if not url_pago and not is_mobile_app:
+                                    st.error("⚠️ Mercado Pago generó la orden pero no devolvió un link de pago. Revisa tu Access Token.")
+                                else:
+                                    st.success(f"✅ ¡Boleto bloqueado! Redirigiendo a Mercado Pago...")
                                     
-                                with tab_movil:
-                                    st.markdown("### Configuración para Frontend Móvil")
-                                    st.write("En tu aplicación (Flutter, React Native, iOS, Android), inicia el SDK nativo enviando este **ID de Preferencia**:")
-                                    st.code(pref_id, language="text")
+                                    # 🚀 REDIRECCIÓN AUTOMÁTICA EN WEB (Solución al clic adicional)
+                                    if not is_mobile_app and url_pago:
+                                        st.components.v1.html(
+                                            f'<script>window.parent.location.href = "{url_pago}";</script>',
+                                            height=0
+                                        )
                                     
+                                    tab_web, tab_movil = st.tabs(["🌐 Pago Web (Navegador)", "📲 Integración App Móvil"])
+                                    
+                                    with tab_web:
+                                        st.write("Si tu navegador bloqueó el salto automático, haz clic aquí:")
+                                        st.link_button("Ir a Mercado Pago ➔", url_pago, type="primary", use_container_width=True)
+                                        
+                                    with tab_movil:
+                                        st.markdown("### Configuración para Frontend Móvil")
+                                        st.write("En tu aplicación (Flutter, React Native, iOS, Android), inicia el SDK enviando este **ID de Preferencia**:")
+                                        st.code(pref_id, language="text")
+                                        
                             except Exception as e:
                                 st.error(f"⚠️ Error creando el pago en Mercado Pago: {e}")
                         else:
                             st.error(f"⚠️ No se pudo guardar en Google Sheets. DETALLE DEL ERROR: {mensaje_error}")
 
-        # Herramienta oculta/colapsable para simular el Webhook si estás haciendo pruebas locales
+        # Herramienta de pruebas locales
         with st.expander("🛠️ Simulador de Webhook / Notificación (Para Pruebas)"):
-            st.caption("Usa esta herramienta si estás desarrollando localmente y quieres simular que Mercado Pago te envió una notificación de pago aprobado.")
+            st.caption("Permite simular que Mercado Pago te envió una notificación en caliente sin necesitar un servidor público.")
             test_payment_id = st.text_input("ID de Pago en Mercado Pago para simular:")
             if st.button("Simular WebHook de Pago", type="secondary"):
                 if test_payment_id:
