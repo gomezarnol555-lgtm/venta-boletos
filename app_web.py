@@ -25,12 +25,25 @@ def obtener_config(nombre: str, default: str = "") -> str:
         if hasattr(st, "secrets") and nombre in st.secrets:
             valor = st.secrets[nombre]
             if valor is not None:
-                return str(valor)
+                return str(valor).strip() # FIX: Elimina espacios o saltos de línea invisibles
     except Exception:
         pass
-    return os.getenv(nombre, default)
+    
+    # FIX: Aplica strip() también a las variables de entorno
+    env_valor = os.getenv(nombre)
+    if env_valor is not None:
+        return str(env_valor).strip()
+        
+    return default
 
 MP_ACCESS_TOKEN = obtener_config("MP_ACCESS_TOKEN")
+
+# FIX: Validación dura. Si el token está vacío, detenemos la app con un error claro
+# para evitar mandar un token vacío a Mercado Pago y recibir UNAUTHORIZED.
+if not MP_ACCESS_TOKEN:
+    st.error("🚨 Error Crítico: No se detectó 'MP_ACCESS_TOKEN'. Verifica tus variables de entorno o el archivo secrets.toml.")
+    st.stop()
+
 MP_NOTIFICATION_URL = obtener_config("MP_NOTIFICATION_URL")
 MP_RETURN_URL = obtener_config("MP_RETURN_URL")
 MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
