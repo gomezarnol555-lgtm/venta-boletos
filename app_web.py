@@ -33,6 +33,7 @@ def generar_pdf_boleto(datos_boleto):
         [Paragraph("<b>Evento:</b>", estilo_normal), Paragraph(datos_boleto['Evento'], estilo_normal)],
         [Paragraph("<b>N° de Boleto:</b>", estilo_normal), Paragraph(str(datos_boleto['Numero_Boleto']), estilo_normal)],
         [Paragraph("<b>Precio Pagado:</b>", estilo_normal), Paragraph(f"${datos_boleto['Precio']:.2f} MXN", estilo_normal)],
+        [Paragraph("<b>Método de Pago:</b>", estilo_normal), Paragraph(str(datos_boleto['Metodo_Pago']), estilo_normal)],
         [Paragraph("<b>Código de Pago:</b>", estilo_normal), Paragraph(datos_boleto['Codigo_Pago'], estilo_normal)],
         [Paragraph("<b>Fecha de Emisión:</b>", estilo_normal), Paragraph(str(datos_boleto['Fecha_Compra']), estilo_normal)]
     ]
@@ -63,7 +64,7 @@ def obtener_datos_gsheets():
         else:
             df_ventas = pd.DataFrame(columns=[
                 "ID_Boleto", "Nombre", "Correo", "Evento", 
-                "Numero_Boleto", "Precio", "Codigo_Pago", "Fecha_Compra"
+                "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra"
             ])
             
         return conn, df_ventas
@@ -79,11 +80,13 @@ def main():
     if conn is None or df_ventas is None:
         return
 
-    # Preservar el estado de los inputs si hay un intento fallido
+    # Inicializar session_state para evitar pérdida de datos en intentos fallidos
     if "input_nombre" not in st.session_state:
         st.session_state.input_nombre = ""
     if "input_correo" not in st.session_state:
         st.session_state.input_correo = ""
+    if "selected_ticket" not in st.session_state:
+        st.session_state.selected_ticket = None
 
     # --- CONFIGURACIÓN DE 100 BOLETOS (000 al 099) ---
     precio_base = 100.00 
@@ -92,72 +95,94 @@ def main():
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
         boletos_vendidos = [f"{int(x):03d}" for x in df_ventas["Numero_Boleto"].dropna().values]
 
-    # Construir mapa de disponibilidad
+    # Construir mapa de disponibilidad general
     matriz_boletos = []
-    boletos_libres = []
-    
     for i in range(100):
         num_str = f"{i:03d}"
         esta_vendido = num_str in boletos_vendidos
-        if not esta_vendido:
-            boletos_libres.append(num_str)
-        
-        # Etiqueta visual para la tabla
         estado_label = f"{num_str} ❌" if esta_vendido else f"{num_str} ✅"
         matriz_boletos.append(estado_label)
 
-    # Crear formato de tabla de 10 columnas por 10 filas para visualización panorámica
-    columnas_grid = [f"Col {i+1}" for i in range(10)]
+    # DataFrame para la tabla de Disponibilidad (sin encabezados genéricos)
+    columnas_vacias = ["" for _ in range(10)]
     filas_grid = [matriz_boletos[i:i+10] for i in range(0, 100, 10)]
-    df_grid = pd.DataFrame(filas_grid, columns=columnas_grid)
+    df_grid = pd.DataFrame(filas_grid, columns=columnas_vacias)
 
-    col1, col2 = st.columns([1.3, 1])
+    col1, col2 = st.columns([1.2, 1])
 
     with col1:
-        st.subheader("📋 Panel Visual de Boletos (000 al 099)")
-        st.write("Observa el estado de todos los números disponibles (✅) y vendidos (❌):")
-        st.dataframe(df_grid, use_container_width=True, hide_index=True)
-        st.caption("✅ = Disponible | ❌ = No disponible / Vendido")
+        st.markdown("### Disponibilidad")
+        st.write("Estado actual de los 100 boletos de la rifa:")
+        st.dataframe(df_grid, use_container_width=True, height=420, hide_index=True)
+        st.caption("✅ = Disponible | ❌ = Vendido / No disponible")
 
     with col2:
-        st.subheader("🛒 Registro de Compra")
+        st.markdown("### 🛒 Registro de Compra")
         
-        if not boletos_libres:
+        # Verificar si hay boletos libres
+        boletos_libres_count = 100 - len(boletos_vendidos)
+        if boletos_libres_count <= 0:
             st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa han sido vendidos.")
             return
 
-        # Formulario interactivo conservando la información
+        st.write("Selecciona tu número directamente en la tabla inferior (los ocupados aparecen tenues):")
+
+        # Tabla interactiva de selección de boletos mediante botones en grilla (10x10)
+        selected_ticket = st.session_state.selected_ticket
+        
+        for fila in range(10):
+            cols_btn = st.columns(10)
+            for col_idx in range(10):
+                num = fila * 10 + col_idx
+                num_str = f"{num:03d}"
+                vendido = num_str in boletos_vendidos
+                
+                with cols_btn[col_idx]:
+                    if vendido:
+                        # Botón desactivado para boletos vendidos
+                        st.button(f"{num_str}", key=f"t_{num_str}", disabled=True, use_container_width=True)
+                    else:
+                        # Botón interactivo para boletos disponibles
+                        is_current = (selected_ticket == num_str)
+                        label = f"[{num_str}]" if is_current else f"{num_str}"
+                        if st.button(label, key=f"t_{num_str}", use_container_width=True):
+                            st.session_state.selected_ticket = num_str
+                            st.rerun()
+
+        if selected_ticket:
+            st.success(f"🎯 Boleto seleccionado: **N° {selected_ticket}**")
+        else:
+            st.info("👆 Haz clic en un número disponible de la tabla para seleccionarlo.")
+
+        st.markdown("---")
+
+        # Formulario de datos con retención de información ante errores
         nombre = st.text_input("Nombre completo:", value=st.session_state.input_nombre)
         correo = st.text_input("Correo electrónico:", value=st.session_state.input_correo)
         evento = st.text_input("Evento:", value="Rifa de celular", disabled=True)
         
-        # Selección del número disponible en la lista desplegable
-        boleto_seleccionado = st.selectbox(
-            "Selecciona tu número de boleto disponible:", 
-            options=boletos_libres
-        )
-        
-        st.markdown("---")
         st.write(f"**Monto a pagar:** ${precio_base:.2f} MXN")
         
-        # Opciones ajustadas a Transferencia y Tarjeta
+        # Métodos de pago solicitados: Transferencia y Tarjeta
         metodo_pago = st.radio("Método de Pago:", ["Transferencia", "Tarjeta"])
         
         pago_realizado = st.checkbox("Confirmo que el pago ha sido efectuado correctamente.")
         
         submit_compra = st.button("💳 Registrar Compra y Generar Boleto")
 
-        # Guardar cambios inmediatamente en el estado
+        # Guardar en tiempo real en session_state para evitar pérdidas si hay fallo
         st.session_state.input_nombre = nombre
         st.session_state.input_correo = correo
 
         if submit_compra:
-            if not nombre or not correo:
-                st.error("⚠️ Por favor completa tu nombre y correo antes de continuar. Tus datos no se perderán.")
+            if not selected_ticket:
+                st.error("⚠️ Debes seleccionar un número de boleto disponible en la tabla superior.")
+            elif not nombre or not correo:
+                st.error("⚠️ Por favor completa tu nombre y correo antes de continuar. Tus datos están a salvo.")
             elif not pago_realizado:
                 st.warning("⚠️ Debes marcar la casilla para confirmar que el pago fue realizado.")
             else:
-                with st.spinner('Procesando pago y actualizando inventario...'):
+                with st.spinner('Procesando pago y actualizando inventario en la nube...'):
                     id_boleto = f"RIFA-{int(datetime.now().timestamp())}"
                     codigo_pago = f"PAY-{random.randint(10000, 99999)}"
                     fecha_compra = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -167,20 +192,21 @@ def main():
                         "Nombre": nombre,
                         "Correo": correo,
                         "Evento": evento,
-                        "Numero_Boleto": str(boleto_seleccionado),
+                        "Numero_Boleto": str(selected_ticket),
                         "Precio": float(precio_base),
+                        "Metodo_Pago": metodo_pago,
                         "Codigo_Pago": codigo_pago,
                         "Fecha_Compra": fecha_compra
                     }
                     
-                    # Actualizar hoja de cálculo en la nube
+                    # Actualizar hoja de cálculo en Google Sheets
                     df_actualizado = pd.concat([df_ventas, pd.DataFrame([datos_nuevo_boleto])], ignore_index=True)
                     conn.update(worksheet="Ventas", data=df_actualizado)
                     
-                    # Generar comprobante PDF
+                    # Generar PDF oficial
                     archivo_pdf = generar_pdf_boleto(datos_nuevo_boleto)
 
-                st.success("✅ ¡Registro completado exitosamente!")
+                st.success("✅ ¡Registro completado y guardado exitosamente!")
                 st.info(f"Tu código de pago asignado: **{codigo_pago}**")
                 
                 with open(archivo_pdf, "rb") as pdf_file:
@@ -194,12 +220,13 @@ def main():
                     key="btn_descarga"
                 )
                 
-                # Reseteo de campos tras completar la transacción exitosamente
+                # Vaciar campos y selección tras registro exitoso
                 st.session_state.input_nombre = ""
                 st.session_state.input_correo = ""
+                st.session_state.selected_ticket = None
                 
-                st.info("🔄 Haz clic abajo para actualizar la vista y ver tu número deshabilitado en la tabla.")
-                if st.button("🔄 Actualizar disponibilidad"):
+                st.success("🔄 *Los campos se han vaciado y el boleto seleccionado ya aparece como no disponible.*")
+                if st.button("🔄 Actualizar interfaz"):
                     st.rerun()
 
 if __name__ == "__main__":
