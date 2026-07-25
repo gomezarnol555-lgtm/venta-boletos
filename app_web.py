@@ -28,24 +28,21 @@ def obtener_config(nombre: str, default: str = "") -> str:
                 return str(valor).strip()
     except Exception:
         pass
-    
     env_valor = os.getenv(nombre)
     if env_valor is not None:
         return str(env_valor).strip()
-        
     return default
 
 MP_ACCESS_TOKEN = obtener_config("MP_ACCESS_TOKEN")
 
 if not MP_ACCESS_TOKEN:
-    st.error("🚨 Error Crítico: No se detectó 'MP_ACCESS_TOKEN'. Verifica tus variables de entorno o el archivo secrets.toml.")
+    st.error("🚨 Error Crítico: No se detectó 'MP_ACCESS_TOKEN'.")
     st.stop()
 
 MP_NOTIFICATION_URL = obtener_config("MP_NOTIFICATION_URL")
 MP_RETURN_URL = obtener_config("MP_RETURN_URL")
 MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
 
-# Inicializar biblioteca de Mercado Pago Server-Side
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 # -----------------------------
@@ -106,8 +103,8 @@ def generar_pdf_boleto(datos_boleto: Dict[str, Any]) -> str:
         [Paragraph("<b>Nombre:</b>", estilo_normal), Paragraph(str(datos_boleto["Nombre"]), estilo_normal)],
         [Paragraph("<b>N° de Boleto:</b>", estilo_normal), Paragraph(str(datos_boleto["Numero_Boleto"]), estilo_normal)],
         [Paragraph("<b>Precio Pagado:</b>", estilo_normal), Paragraph(f"${precio_float:.2f} {MP_CURRENCY_ID}", estilo_normal)],
-        [Paragraph("<b>ID de Pago (MP):</b>", estilo_normal), Paragraph(str(datos_boleto["MercadoPago_Payment_ID"]), estilo_normal)],
-        [Paragraph("<b>Fecha:</b>", estilo_normal), Paragraph(str(datos_boleto["Fecha_Compra"]), estilo_normal)]
+        [Paragraph("<b>ID de Pago (MP):</b>", estilo_normal), Paragraph(str(datos_boleto.get("MercadoPago_Payment_ID", "N/A")), estilo_normal)],
+        [Paragraph("<b>Fecha:</b>", estilo_normal), Paragraph(str(datos_boleto.get("Fecha_Compra", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))), estilo_normal)]
     ]
     
     t = Table(data, colWidths=[165, 300])
@@ -125,58 +122,59 @@ def generar_pdf_boleto(datos_boleto: Dict[str, Any]) -> str:
 def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, monto, external_reference, custom_return_scheme: Optional[str] = None):
     url_retorno = custom_return_scheme if custom_return_scheme else MP_RETURN_URL
     
-    # MEJORA EXPERTA: Mercado Pago exige Nombre y Apellido separados para validar SPEI.
     partes_nombre = nombre.strip().split(" ", 1)
     payer_name = partes_nombre[0]
     payer_surname = partes_nombre[1] if len(partes_nombre) > 1 else "Sin Apellido"
     
     preference_data = {
-        "items": [
-            {
-                "title": f"Rifa celular - Boleto {numero_boleto}",
-                "quantity": 1,
-                "unit_price": float(monto),
-                "currency_id": MP_CURRENCY_ID
-            }
-        ],
+        "items": [{
+            "title": f"Rifa celular - Boleto {numero_boleto}",
+            "quantity": 1,
+            "unit_price": float(monto),
+            "currency_id": MP_CURRENCY_ID
+        }],
         "payer": {
             "name": payer_name,
             "surname": payer_surname,
             "email": correo,
-            "phone": {
-                "area_code": "52", # Ajusta el código de país si es necesario
-                "number": telefono
-            }
+            "phone": {"area_code": "52", "number": telefono}
         },
         "external_reference": external_reference,
-        "payment_methods": {
-            "excluded_payment_methods": [],
-            "excluded_payment_types": [],
-            "installments": 12
-        },
+        "payment_methods": {"excluded_payment_methods": [], "excluded_payment_types": [], "installments": 1},
         "statement_descriptor": "RIFA CELULAR"
     }
     
     if url_retorno:
-        preference_data["back_urls"] = {
-            "success": url_retorno,
-            "pending": url_retorno,
-            "failure": url_retorno
-        }
+        preference_data["back_urls"] = {"success": url_retorno, "pending": url_retorno, "failure": url_retorno}
         preference_data["auto_return"] = "approved"
         
-    if MP_NOTIFICATION_URL:
-        preference_data["notification_url"] = MP_NOTIFICATION_URL
-    
     preference_response = sdk.preference().create(preference_data)
     preference = preference_response.get("response", {})
     
     if "id" not in preference:
-        error_msg = preference.get("message", "Error desconocido o Access Token inválido")
-        raise Exception(f"Rechazado por MP: {error_msg}")
+        raise Exception(f"Rechazado por MP: {preference.get('message', 'Error')}")
         
     url_pago = preference.get("init_point") or preference.get("sandbox_init_point", "")
     return preference.get("id", ""), url_pago
+
+# -----------------------------
+# Consultar APIs de MP (NUEVA FUNCIÓN EXPERTA)
+# -----------------------------
+def buscar_pago_en_mercadopago(external_reference: str) -> Optional[Dict]:
+    """Consulta la API de Mercado Pago buscando si una referencia específica ya fue pagada."""
+    try:
+        filtros = {"external_reference": external_reference}
+        resultado = sdk.payment().search(filtros)
+        pagos = resultado.get("response", {}).get("results", [])
+        
+        # Filtrar solo el que esté aprobado
+        for pago in pagos:
+            if pago.get("status") == "approved":
+                return pago
+        return None
+    except Exception as e:
+        print(f"Error consultando API MP: {e}")
+        return None
 
 # -----------------------------
 # Google Sheets y Estados
@@ -199,9 +197,12 @@ def parse_ticket_number(val: Any) -> str:
 
 def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -> dict:
     estados = {}
+    
+    # Primero vemos los reservados
     if not df_reservas.empty and "Numero_Boleto" in df_reservas.columns:
         for _, row in df_reservas.iterrows():
-            if str(row.get("Estado_Reserva", "")).strip().upper() == "PENDIENTE":
+            estado_res = str(row.get("Estado_Reserva", "")).strip().upper()
+            if estado_res == "PENDIENTE":
                 expira_str = row.get("Expira_En")
                 try: expira = pd.to_datetime(str(expira_str)).to_pydatetime()
                 except: expira = None
@@ -210,10 +211,11 @@ def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -
                     num = parse_ticket_number(row["Numero_Boleto"])
                     if num: estados[num] = "reservado"
 
+    # Los vendidos SOBREESCRIBEN a los reservados
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
         for _, row in df_ventas.iterrows():
             estado_pago = str(row.get("Estado_Pago", "")).strip().upper()
-            if estado_pago not in ["RECHAZADO", "CANCELADO", "REEMBOLSADO", "PENDIENTE"]:
+            if estado_pago in ["APROBADO", "VENDIDO"]:
                 num = parse_ticket_number(row["Numero_Boleto"])
                 if num: estados[num] = "vendido"
                 
@@ -222,7 +224,7 @@ def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -
 def registrar_reserva_cobro(conn: GSheetsConnection, orden: Dict[str, Any]) -> Tuple[bool, str]:
     try:
         try: df_r = conn.read(worksheet="Reservas", ttl=0)
-        except Exception: df_r = pd.DataFrame(columns=columnas_reservas())
+        except: df_r = pd.DataFrame(columns=columnas_reservas())
         
         df_r = asegurar_columnas(df_r.dropna(how="all"), columnas_reservas())
         df_nuevo = asegurar_columnas(pd.DataFrame([orden]), columnas_reservas())
@@ -233,82 +235,58 @@ def registrar_reserva_cobro(conn: GSheetsConnection, orden: Dict[str, Any]) -> T
     except Exception as e:
         return False, str(e)
 
-# -------------------------------------------------------------
-# Motor de Notificaciones (Webhooks / IPN)
-# -------------------------------------------------------------
-def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, Any]) -> bool:
-    try:
-        ext_ref = payment_info.get("external_reference", "")
-        estado_pago = payment_info.get("status", "")
-        pago_id = str(payment_info.get("id", ""))
+def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Registra la venta en Sheets de forma segura y devuelve los datos del boleto."""
+    ext_ref = payment_info.get("external_reference", "")
+    pago_id = str(payment_info.get("id", ""))
+    
+    try: df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
+    except: df_r = pd.DataFrame(columns=columnas_reservas())
         
-        try: df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
-        except: df_r = pd.DataFrame(columns=columnas_reservas())
+    try: df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
+    except: df_v = pd.DataFrame(columns=columnas_ventas())
+    
+    df_r = asegurar_columnas(df_r, columnas_reservas())
+    df_v = asegurar_columnas(df_v, columnas_ventas())
+    
+    # Si ya existe en ventas, solo lo devolvemos para imprimir el PDF
+    filtro_existente = df_v["MercadoPago_Payment_ID"].astype(str) == str(pago_id)
+    if filtro_existente.any():
+        return df_v[filtro_existente].iloc[0].to_dict()
             
-        try: df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
-        except: df_v = pd.DataFrame(columns=columnas_ventas())
+    # Si no existe, buscamos la reserva y la convertimos en Venta
+    filtro_reserva = df_r["External_Reference"] == ext_ref
+    if filtro_reserva.any():
+        reserva = df_r[filtro_reserva].iloc[0]
         
-        df_r = asegurar_columnas(df_r, columnas_reservas())
-        df_v = asegurar_columnas(df_v, columnas_ventas())
+        df_r.loc[filtro_reserva, "Estado_Reserva"] = "PAGADO"
+        df_r.loc[filtro_reserva, "MercadoPago_Payment_ID"] = pago_id
+        conn.update(worksheet="Reservas", data=df_r)
         
-        if estado_pago == "approved" and not df_r.empty:
-            filtro_existente = df_v["MercadoPago_Payment_ID"].astype(str) == str(pago_id)
-            if filtro_existente.any():
-                return True 
-                
-            filtro_reserva = df_r["External_Reference"] == ext_ref
-            if filtro_reserva.any():
-                reserva = df_r[filtro_reserva].iloc[0]
-                
-                df_r.loc[filtro_reserva, "Estado_Reserva"] = "PAGADO"
-                df_r.loc[filtro_reserva, "MercadoPago_Payment_ID"] = pago_id
-                conn.update(worksheet="Reservas", data=df_r)
-                
-                nueva_venta = {
-                    "ID_Boleto": f"BOL-{random.randint(10000, 99999)}",
-                    "Nombre": reserva["Nombre"],
-                    "Correo": reserva["Correo"],
-                    "Evento": "Rifa de Celular",
-                    "Numero_Boleto": reserva["Numero_Boleto"],
-                    "Precio": reserva["Monto"],
-                    "Metodo_Pago": payment_info.get("payment_type_id", "mercadopago"),
-                    "Codigo_Pago": pago_id,
-                    "Fecha_Compra": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Numero_Telefonico": reserva["Numero_Telefonico"],
-                    "Estado_Pago": "APROBADO",
-                    "Referencia_Pago": ext_ref,
-                    "MercadoPago_Payment_ID": pago_id,
-                    "MercadoPago_Preference_ID": reserva["MercadoPago_Preference_ID"]
-                }
-                df_v_actualizado = pd.concat([df_v, pd.DataFrame([nueva_venta])], ignore_index=True)
-                conn.update(worksheet="Ventas", data=df_v_actualizado)
-                return True
-        return False
-    except Exception as e:
-        print(f"Error procesando hojas: {e}")
-        return False
-
-def procesar_notificacion_mercadopago(payload: Dict[str, Any], conn: GSheetsConnection) -> Optional[Dict[str, Any]]:
-    try:
-        data = payload if "type" in payload else payload.get("data", {})
-        notification_type = payload.get("type", data.get("type", ""))
-        
-        if notification_type == "payment":
-            payment_id = payload.get("data", {}).get("id") or payload.get("id")
-            if not payment_id: return None
-            
-            payment = sdk.payment().get(payment_id)
-            payment_data = payment.get("response", {})
-            
-            if payment_data.get("status") == "approved":
-                actualizar_pago_en_hojas(conn, payment_data)
-            return payment_data
-        return None
-    except Exception:
-        return None
+        nueva_venta = {
+            "ID_Boleto": f"BOL-{random.randint(10000, 99999)}",
+            "Nombre": reserva["Nombre"],
+            "Correo": reserva["Correo"],
+            "Evento": "Rifa de Celular",
+            "Numero_Boleto": reserva["Numero_Boleto"],
+            "Precio": reserva["Monto"],
+            "Metodo_Pago": payment_info.get("payment_type_id", "mercadopago"),
+            "Codigo_Pago": pago_id,
+            "Fecha_Compra": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Numero_Telefonico": reserva["Numero_Telefonico"],
+            "Estado_Pago": "APROBADO",
+            "Referencia_Pago": ext_ref,
+            "MercadoPago_Payment_ID": pago_id,
+            "MercadoPago_Preference_ID": reserva["MercadoPago_Preference_ID"]
+        }
+        df_v_actualizado = pd.concat([df_v, pd.DataFrame([nueva_venta])], ignore_index=True)
+        conn.update(worksheet="Ventas", data=df_v_actualizado)
+        return nueva_venta
+    
+    return {}
 
 # -----------------------------
-# Dashboard y UX Principal
+# Componentes UI
 # -----------------------------
 @st.fragment(run_every=5)
 def renderizar_mapa_interactivo():
@@ -320,20 +298,18 @@ def renderizar_mapa_interactivo():
         df_v, df_r = pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
 
     estados = obtener_estado_boletos(df_v, df_r)
-
     vendidos = sum(1 for v in estados.values() if v == "vendido")
     reservados = sum(1 for v in estados.values() if v == "reservado")
     disponibles = 100 - vendidos - reservados
 
-    html_metrics = f"""
+    st.markdown(f"""
     <div class="metric-container">
         <div class="metric-box m-green"><h2>🟢 {disponibles}</h2><p>Disponibles</p></div>
-        <div class="metric-box m-yellow"><h2>🟡 {reservados}</h2><p>Reservados</p></div>
+        <div class="metric-box m-yellow"><h2>🟡 {reservados}</h2><p>Reservados (Por Pagar)</p></div>
         <div class="metric-box m-red"><h2>🔴 {vendidos}</h2><p>Vendidos</p></div>
     </div>
-    """
-    st.markdown(html_metrics, unsafe_allow_html=True)
-    st.markdown("Haz clic en un boleto 🟢 **Verde** para seleccionarlo.")
+    <p>Haz clic en un boleto 🟢 <b>Verde</b> para seleccionarlo.</p>
+    """, unsafe_allow_html=True)
 
     for fila in range(10):
         cols = st.columns(10)
@@ -349,11 +325,22 @@ def renderizar_mapa_interactivo():
                 else:
                     is_selected = (st.session_state.get("selected_ticket") == num)
                     etiqueta = f"✅\n{num}" if is_selected else f"🟢\n{num}"
-                    tipo = "primary" if is_selected else "secondary"
-                    
-                    if st.button(etiqueta, key=f"btn_{num}", type=tipo):
+                    if st.button(etiqueta, key=f"btn_{num}", type="primary" if is_selected else "secondary"):
                         st.session_state.selected_ticket = num
                         st.rerun()
+
+def procesar_descarga_pdf(datos_boleto: dict):
+    archivo_pdf = generar_pdf_boleto(datos_boleto)
+    with open(archivo_pdf, "rb") as pdf_file:
+        pdf_bytes = pdf_file.read()
+    st.download_button(
+        label="⬇️ Descargar mi Boleto Oficial (PDF)",
+        data=pdf_bytes,
+        file_name=archivo_pdf,
+        mime="application/pdf",
+        type="primary",
+        use_container_width=True
+    )
 
 def main():
     st.set_page_config(page_title="Rifa de Celular", page_icon="🎟️", layout="wide")
@@ -366,54 +353,78 @@ def main():
     conn = st.connection("gsheets", type=GSheetsConnection)
     qp = st.query_params
 
-    # 1. Escucha de Webhooks en Segundo plano
-    if ("type" in qp or "topic" in qp) and ("id" in qp or "data.id" in qp):
-        notif_type = qp.get("type", qp.get("topic"))
-        notif_id = qp.get("id", qp.get("data.id"))
-        procesar_notificacion_mercadopago({"type": notif_type, "data": {"id": notif_id}}, conn)
-        st.query_params.clear()
-
-    # 2. Flujo cuando el usuario retorna tras Pagar exitosamente
+    # Detección de retorno automático (Tarjetas)
     if "payment_id" in qp and "status" in qp and qp["status"] == "approved":
         st.session_state.payment_success_id = qp["payment_id"]
         st.session_state.pago_generado_url = None
         st.query_params.clear()
         st.rerun()
 
-    # PANTALLA DE ÉXITO Y DESCARGA DE PDF
-    if st.session_state.payment_success_id:
-        pago_id = st.session_state.payment_success_id
-        st.balloons()
+    st.title("📱 Plataforma de Boletos - Gran Rifa")
+    
+    # SISTEMA DE PESTAÑAS (Aquí resolvemos el problema de SPEI/OXXO)
+    tab1, tab2 = st.tabs(["🛒 Comprar Boleto", "🔍 Buscar mi Boleto / Verificar Pago Transferencia"])
+
+    # --- PESTAÑA 2: VERIFICACIÓN Y DESCARGA PARA PAGOS ASÍNCRONOS (SPEI) ---
+    with tab2:
+        st.markdown("### ¿Pagaste por Transferencia (SPEI) u OXXO y cerraste la ventana?")
+        st.write("No te preocupes. Escribe tus datos, el sistema verificará tu pago y te entregará tu PDF.")
         
-        col_c, col_centro, col_d = st.columns([1, 2, 1])
-        with col_centro:
-            st.success(f"🎉 ¡Compra Confirmada! Su pago (ID: {pago_id}) fue aprobado.")
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            buscar_num = st.text_input("Ingresa tu número de boleto (ej. 005):")
+        with col_b2:
+            buscar_correo = st.text_input("Ingresa tu correo electrónico:")
+            
+        if st.button("🔍 Verificar Pago y Descargar PDF", type="primary"):
+            if not buscar_num or not buscar_correo:
+                st.warning("Por favor, llena ambos campos.")
+            else:
+                with st.spinner("Conectando de forma segura con Mercado Pago y el Banco..."):
+                    try:
+                        df_r = conn.read(worksheet="Reservas", ttl=0)
+                        filtro = (df_r["Numero_Boleto"].astype(str).str.zfill(3) == str(buscar_num).zfill(3)) & (df_r["Correo"].str.lower() == buscar_correo.lower())
+                        reservas_encontradas = df_r[filtro]
+                        
+                        if reservas_encontradas.empty:
+                            st.error("No encontramos una reserva con esos datos. Verifica que el correo esté bien escrito.")
+                        else:
+                            # Tomamos la reserva más reciente
+                            reserva = reservas_encontradas.iloc[-1]
+                            ext_ref = reserva["External_Reference"]
+                            
+                            # Magia: Consultamos directo a la API de MP usando su referencia única
+                            pago_mp = buscar_pago_en_mercadopago(ext_ref)
+                            
+                            if pago_mp:
+                                # El pago ya pasó el SPEI/OXXO. Lo registramos y generamos PDF.
+                                st.success("✅ ¡Pago encontrado y aprobado! Tu boleto está confirmado.")
+                                st.balloons()
+                                datos_boleto = actualizar_pago_en_hojas(conn, pago_mp)
+                                if datos_boleto:
+                                    procesar_descarga_pdf(datos_boleto)
+                            else:
+                                st.warning("⏳ Tu reserva existe, pero Mercado Pago aún reporta el pago como PENDIENTE. Si transferiste hace menos de 5 minutos, intenta de nuevo en un momento.")
+                    except Exception as e:
+                        st.error(f"Error de conexión al verificar: {e}")
+
+    # --- PESTAÑA 1: FLUJO NORMAL DE COMPRA ---
+    with tab1:
+        if st.session_state.payment_success_id:
+            pago_id = st.session_state.payment_success_id
+            st.balloons()
+            st.success(f"🎉 ¡Compra Confirmada mediante Tarjeta! Su pago (ID: {pago_id}) fue aprobado.")
             
             with st.spinner("Generando tu comprobante en PDF..."):
-                procesar_notificacion_mercadopago({"type": "payment", "data": {"id": pago_id}}, conn)
-                
                 try:
-                    df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
-                    df_v = asegurar_columnas(df_v, columnas_ventas())
-                    venta_row = df_v[df_v["MercadoPago_Payment_ID"].astype(str) == str(pago_id)]
+                    # Obtenemos los datos desde MP directo usando el SDK para la compra con tarjeta
+                    payment_info = sdk.payment().get(pago_id).get("response", {})
+                    datos_boleto = actualizar_pago_en_hojas(conn, payment_info)
                     
-                    if not venta_row.empty:
-                        datos_boleto = venta_row.iloc[0].to_dict()
-                        archivo_pdf = generar_pdf_boleto(datos_boleto)
-                        
-                        with open(archivo_pdf, "rb") as pdf_file:
-                            pdf_bytes = pdf_file.read()
-                            
-                        st.download_button(
-                            label="⬇️ Descargar Boleto Oficial (PDF)",
-                            data=pdf_bytes,
-                            file_name=archivo_pdf,
-                            mime="application/pdf",
-                            type="primary",
-                            use_container_width=True
-                        )
+                    if datos_boleto:
+                        procesar_descarga_pdf(datos_boleto)
                     else:
-                        st.info("🕒 Sincronizando tu boleto con la base de datos... Recarga la página en unos segundos.")
+                        st.error("Hubo un problema sincronizando el boleto.")
                 except Exception as e:
                     st.error(f"Error al generar el PDF: {e}")
             
@@ -422,94 +433,74 @@ def main():
                 st.session_state.payment_success_id = None
                 st.session_state.selected_ticket = None
                 st.rerun()
-                
-        st.stop()
+            st.stop()
 
+        col_mapa, col_form = st.columns([1.5, 1], gap="large")
 
-    # -----------------------------
-    # INTERFAZ HABITUAL DE RESERVA
-    # -----------------------------
-    st.title("📱 Plataforma de Boletos")
-    col_mapa, col_form = st.columns([1.5, 1], gap="large")
+        with col_mapa:
+            st.subheader("🎟️ Mapa de Disponibilidad")
+            renderizar_mapa_interactivo()
 
-    with col_mapa:
-        st.subheader("🎟️ Mapa de Disponibilidad")
-        renderizar_mapa_interactivo()
-
-    with col_form:
-        st.subheader("🛒 Finalizar Compra")
-        # MEJORA EXPERTA: Aumento a 15.00 MXN para cumplir comisiones de MP y habilitar SPEI
-        precio_base = 15.00 
-        ticket = st.session_state.selected_ticket
-        
-        with st.container(border=True):
-            if not ticket:
-                st.info("👆 Selecciona un boleto disponible a la izquierda.")
-                st.session_state.pago_generado_url = None
-            else:
-                st.success(f"🎫 **Boleto seleccionado: {ticket}**")
-                
-                # Si ya generó el link de pago, mostramos el botón directo.
-                if st.session_state.pago_generado_url:
-                    st.info("Serás redirigido a la plataforma de Mercado Pago. Ahí podrás seleccionar si deseas pagar con Tarjeta, Transferencia (SPEI) o Efectivo (OXXO/PayCash).")
-                    st.link_button(
-                        label="💳 Pagar con Mercado Pago ➔",
-                        url=st.session_state.pago_generado_url,
-                        type="primary",
-                        use_container_width=True
-                    )
-                    
-                    st.write("---")
-                    if st.button("Cancelar o cambiar datos"):
-                        st.session_state.pago_generado_url = None
-                        st.rerun()
-                
-                # Formulario inicial si no ha reservado
+        with col_form:
+            st.subheader("🛒 Finalizar Compra")
+            precio_base = 15.00 
+            ticket = st.session_state.selected_ticket
+            
+            with st.container(border=True):
+                if not ticket:
+                    st.info("👆 Selecciona un boleto disponible a la izquierda.")
+                    st.session_state.pago_generado_url = None
                 else:
-                    nombre = st.text_input("Nombre completo:")
-                    correo = st.text_input("Correo electrónico:")
-                    telefono = st.text_input("Número de WhatsApp / Celular:")
+                    st.success(f"🎫 **Boleto seleccionado: {ticket}**")
                     
-                    is_mobile_app = st.checkbox("📲 ¿Orden desde App Móvil? (Deep Link)", value=False)
-                    custom_scheme = st.text_input("Esquema (ej: app://checkout):", value="rifaapp://pago") if is_mobile_app else None
-                    
-                    st.write(f"**Total:** ${precio_base:.2f} MXN")
+                    if st.session_state.pago_generado_url:
+                        st.info("Serás redirigido a Mercado Pago para elegir: Tarjeta, Transferencia o Efectivo.")
+                        st.link_button("💳 Pagar con Mercado Pago ➔", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
+                        st.caption("🚨 Si pagas por Transferencia y cierras esta ventana, vuelve a entrar luego y usa la pestaña **'Buscar mi Boleto'** para descargar tu PDF.")
+                        
+                        st.write("---")
+                        if st.button("Cancelar reserva actual"):
+                            st.session_state.pago_generado_url = None
+                            st.rerun()
+                    else:
+                        nombre = st.text_input("Nombre completo:")
+                        correo = st.text_input("Correo electrónico:")
+                        telefono = st.text_input("Número de WhatsApp / Celular:")
+                        st.write(f"**Total a Pagar:** ${precio_base:.2f} MXN")
 
-                    if st.button("Reservar Boleto", type="primary", use_container_width=True):
-                        if not nombre or not correo or not telefono:
-                            st.error("⚠️ Completa tus datos para proceder.")
-                        else:
-                            ref_externa = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{ticket}"
-                            fecha = datetime.now()
-                            
-                            reserva = {
-                                "External_Reference": ref_externa,
-                                "MercadoPago_Preference_ID": "",
-                                "MercadoPago_Payment_ID": "",
-                                "Numero_Boleto": str(ticket),
-                                "Nombre": nombre,
-                                "Correo": correo,
-                                "Numero_Telefonico": telefono,
-                                "Monto": float(precio_base),
-                                "Estado_Reserva": "PENDIENTE",
-                                "Fecha_Creacion": fecha.strftime("%Y-%m-%d %H:%M:%S"),
-                                "Expira_En": (fecha + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
-                                "Fecha_Actualizacion": fecha.strftime("%Y-%m-%d %H:%M:%S"),
-                            }
+                        if st.button("Reservar Boleto", type="primary", use_container_width=True):
+                            if not nombre or not correo or not telefono:
+                                st.error("⚠️ Completa tus datos para proceder.")
+                            else:
+                                ref_externa = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{ticket}"
+                                fecha = datetime.now()
+                                reserva = {
+                                    "External_Reference": ref_externa,
+                                    "MercadoPago_Preference_ID": "",
+                                    "MercadoPago_Payment_ID": "",
+                                    "Numero_Boleto": str(ticket),
+                                    "Nombre": nombre,
+                                    "Correo": correo,
+                                    "Numero_Telefonico": telefono,
+                                    "Monto": float(precio_base),
+                                    "Estado_Reserva": "PENDIENTE",
+                                    "Fecha_Creacion": fecha.strftime("%Y-%m-%d %H:%M:%S"),
+                                    "Expira_En": (fecha + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
+                                    "Fecha_Actualizacion": fecha.strftime("%Y-%m-%d %H:%M:%S"),
+                                }
 
-                            with st.spinner("Conectando con Mercado Pago..."):
-                                exito, msj = registrar_reserva_cobro(conn, reserva)
-                                if exito:
-                                    try:
-                                        pref_id, url_pago = crear_preferencia_mercado_pago(nombre, correo, telefono, ticket, precio_base, ref_externa, custom_scheme)
-                                        if url_pago:
-                                            # Guardamos en sesión y recargamos para mostrar el botón de Mercado Pago
-                                            st.session_state.pago_generado_url = url_pago
-                                            st.rerun()
-                                    except Exception as e:
-                                        st.error(f"⚠️ Error creando pago: {e}")
-                                else:
-                                    st.error(f"⚠️ Error guardando en Sheets: {msj}")
+                                with st.spinner("Conectando con Mercado Pago..."):
+                                    exito, msj = registrar_reserva_cobro(conn, reserva)
+                                    if exito:
+                                        try:
+                                            pref_id, url_pago = crear_preferencia_mercado_pago(nombre, correo, telefono, ticket, precio_base, ref_externa, None)
+                                            if url_pago:
+                                                st.session_state.pago_generado_url = url_pago
+                                                st.rerun()
+                                        except Exception as e:
+                                            st.error(f"⚠️ Error creando pago: {e}")
+                                    else:
+                                        st.error(f"⚠️ Error guardando en Sheets: {msj}")
 
 if __name__ == "__main__":
     main()
