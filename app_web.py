@@ -1,4 +1,3 @@
-import os
 import random
 from datetime import datetime
 import pandas as pd
@@ -7,41 +6,23 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-
-# Archivo Excel para el control de registros
-EXCEL_FILE = "registro_boletos.xlsx"
-
-def inicializar_excel():
-    """Crea el archivo Excel si no existe."""
-    if not os.path.exists(EXCEL_FILE):
-        df = pd.DataFrame(columns=[
-            "ID_Boleto", "Nombre", "Correo", "Evento", "Precio", "Codigo_Pago", "Fecha_Compra"
-        ])
-        df.to_excel(EXCEL_FILE, index=False)
+from streamlit_gsheets import GSheetsConnection
 
 def generar_pdf_boleto(datos_boleto):
-    """Genera el comprobante/boleto en formato PDF y devuelve el nombre del archivo."""
     nombre_archivo = f"Boleto_{datos_boleto['ID_Boleto']}.pdf"
     doc = SimpleDocTemplate(nombre_archivo, pagesize=letter)
     story = []
     
     styles = getSampleStyleSheet()
     estilo_titulo = ParagraphStyle(
-        'TituloBoleto',
-        parent=styles['Heading1'],
-        fontSize=20,
-        textColor=colors.HexColor("#1A365D"),
-        alignment=1
+        'TituloBoleto', parent=styles['Heading1'], fontSize=20,
+        textColor=colors.HexColor("#1A365D"), alignment=1
     )
-    
     estilo_normal = ParagraphStyle(
-        'TextoBoleto',
-        parent=styles['Normal'],
-        fontSize=12,
+        'TextoBoleto', parent=styles['Normal'], fontSize=12,
         textColor=colors.HexColor("#2D3748")
     )
     
-    # Contenido del Boleto
     story.append(Paragraph("COMPROBANTE OFICIAL DE BOLETO", estilo_titulo))
     story.append(Spacer(1, 20))
     
@@ -50,6 +31,7 @@ def generar_pdf_boleto(datos_boleto):
         [Paragraph("<b>Asistente:</b>", estilo_normal), Paragraph(datos_boleto['Nombre'], estilo_normal)],
         [Paragraph("<b>Correo:</b>", estilo_normal), Paragraph(datos_boleto['Correo'], estilo_normal)],
         [Paragraph("<b>Evento:</b>", estilo_normal), Paragraph(datos_boleto['Evento'], estilo_normal)],
+        [Paragraph("<b>Asiento/Boleto N°:</b>", estilo_normal), Paragraph(str(datos_boleto['Numero_Boleto']), estilo_normal)],
         [Paragraph("<b>Precio Pagado:</b>", estilo_normal), Paragraph(f"${datos_boleto['Precio']:.2f} MXN", estilo_normal)],
         [Paragraph("<b>Código de Pago:</b>", estilo_normal), Paragraph(datos_boleto['Codigo_Pago'], estilo_normal)],
         [Paragraph("<b>Fecha de Emisión:</b>", estilo_normal), Paragraph(str(datos_boleto['Fecha_Compra']), estilo_normal)]
@@ -70,70 +52,126 @@ def generar_pdf_boleto(datos_boleto):
     doc.build(story)
     return nombre_archivo
 
-def registrar_en_excel(datos_boleto):
-    """Registra la información del boleto en el archivo Excel."""
-    df = pd.read_excel(EXCEL_FILE)
-    nuevo_registro = pd.DataFrame([datos_boleto])
-    df = pd.concat([df, nuevo_registro], ignore_index=True)
-    df.to_excel(EXCEL_FILE, index=False)
+def obtener_datos_gsheets():
+    """Obtiene el inventario y ventas desde Google Sheets."""
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    df_ventas = conn.read(worksheet="Ventas", usecols=list(range(7)), ttl=0)
+    df_ventas = df_ventas.dropna(how="all")
+    return conn, df_ventas
 
 def main():
-    st.set_page_config(page_title="Venta de Boletos", page_icon="🎟️")
-    st.title("🎟️ Sistema de Registro y Venta de Boletos")
+    st.set_page_config(page_title="Venta de Boletos y Asientos", page_icon="🎟️", layout="wide")
+    st.title("🎟️ Sistema de Venta de Boletos y Control de Asistentes")
     
-    inicializar_excel()
+    try:
+        conn, df_ventas = obtener_datos_gsheets()
+    except Exception:
+        st.error("⚠️ Error de conexión con Google Sheets. Asegúrate de configurar las credenciales secretas más adelante.")
+        return
+
+    # --- CONFIGURACIÓN INICIAL DE BOLETOS DISPONIBLES ---
+    # Definimos 10 boletos disponibles por defecto con sus precios
+    total_boletos_config = 10
+    precio_base = 250.00
     
-    # Formulario web
-    with st.form("formulario_compra"):
-        st.subheader("Datos del Asistente")
-        nombre = st.text_input("Ingrese su nombre completo:")
-        correo = st.text_input("Ingrese su correo electrónico:")
-        evento = st.text_input("Nombre del evento:")
+    lista_inventario = []
+    boletos_vendidos = df_ventas["Numero_Boleto"].values if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns else []
+
+    for i in range(1, total_boletos_config + 1):
+        estado = "Vendido ❌" if i in boletos_vendidos else "Disponible ✅"
+        lista_inventario.append({
+            "Boleto N°": i,
+            "Precio": f"${precio_base:.2f} MXN",
+            "Estado": estado
+        })
+    
+    df_inventario = pd.DataFrame(lista_inventario)
+
+    # Diseño en dos columnas en pantalla
+    col1, col2 = st.columns([1.2, 1])
+
+    with col1:
+        st.subheader("📋 Tabla de Disponibilidad de Boletos")
+        st.dataframe(df_inventario, use_container_width=True, hide_index=True)
         
-        st.subheader("Pago")
-        precio = st.number_input("Precio del boleto (MXN):", min_value=1.0, step=50.0)
-        metodo = st.selectbox("Seleccione método de pago:", ["Tarjeta de Crédito/Débito", "Transferencia SPEI"])
-        
-        # Botón de envío
-        submit = st.form_submit_button("Generar Código y Pagar")
-        
-    if submit:
-        if not nombre or not correo or not evento:
-            st.error("⚠️ Por favor, llena todos los campos antes de continuar.")
+        # Panel de Monitoreo de Ventas (Historial)
+        st.markdown("---")
+        st.subheader("📊 Historial de Monitoreo de Ventas")
+        if not df_ventas.empty:
+            total_recaudado = df_ventas["Precio"].sum() if "Precio" in df_ventas.columns else 0
+            st.metric(label="Ingresos Totales Acumulados", value=f"${total_recaudado:.2f} MXN")
+            st.dataframe(df_ventas, use_container_width=True, hide_index=True)
         else:
-            # Simular procesamiento de pago
-            with st.spinner('Procesando pago...'):
-                id_boleto = f"BOL-{int(datetime.now().timestamp())}"
-                codigo_pago = f"PAY-{random.randint(10000, 99999)}"
-                fecha_compra = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                datos_boleto = {
-                    "ID_Boleto": id_boleto,
-                    "Nombre": nombre,
-                    "Correo": correo,
-                    "Evento": evento,
-                    "Precio": precio,
-                    "Codigo_Pago": codigo_pago,
-                    "Fecha_Compra": fecha_compra
-                }
-                
-                # Generar PDF y guardar en Excel
-                archivo_pdf = generar_pdf_boleto(datos_boleto)
-                registrar_en_excel(datos_boleto)
+            st.info("Aún no hay ventas registradas en el historial.")
+
+    with col2:
+        st.subheader("🛒 Formulario de Compra")
+        
+        # Filtramos solo los boletos que están libres
+        boletos_libres = [item["Boleto N°"] for item in lista_inventario if item["Estado"] == "Disponible ✅"]
+        
+        if not boletos_libres:
+            st.warning("⚠️ ¡Lo sentimos! Todos los boletos están agotados.")
+            return
+
+        with st.form("form_compra"):
+            nombre = st.text_input("Nombre completo:")
+            correo = st.text_input("Correo electrónico:")
+            evento = st.text_input("Nombre del evento:", value="Conferencia Principal 2026")
+            boleto_seleccionado = st.selectbox("Selecciona tu número de boleto disponible:", boletos_libres)
             
-            st.success("✅ ¡Pago procesado exitosamente!")
-            st.info(f"Tu código de confirmación de pago es: **{codigo_pago}**")
+            st.markdown("---")
+            st.write(f"**Monto a pagar:** ${precio_base:.2f} MXN")
+            metodo_pago = st.radio("Método de Pago Seguro:", ["Tarjeta de Crédito/Débito (Simulado)", "Transferencia Bancaria SPEI"])
             
-            # Botón para descargar el PDF
-            with open(archivo_pdf, "rb") as pdf_file:
-                pdf_bytes = pdf_file.read()
+            pago_realizado = st.checkbox("Confirmo que he realizado el pago correspondiente.")
+            
+            submit_compra = st.form_submit_button("💳 Procesar Pago y Generar Boleto")
+
+        if submit_compra:
+            if not nombre or not correo or not evento:
+                st.error("⚠️ Por favor completa todos los campos del formulario.")
+            elif not pago_realizado:
+                st.warning("⚠️ Debes marcar la casilla confirmando que realizaste el pago para continuar.")
+            else:
+                with st.spinner('Validando pago y generando boleto oficial...'):
+                    id_boleto = f"BOL-{int(datetime.now().timestamp())}"
+                    codigo_pago = f"PAY-SECURE-{random.randint(10000, 99999)}"
+                    fecha_compra = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    datos_nuevo_boleto = {
+                        "ID_Boleto": id_boleto,
+                        "Nombre": nombre,
+                        "Correo": correo,
+                        "Evento": evento,
+                        "Numero_Boleto": int(boleto_seleccionado),
+                        "Precio": float(precio_base),
+                        "Codigo_Pago": codigo_pago,
+                        "Fecha_Compra": fecha_compra
+                    }
+                    
+                    # Guardar en Google Sheets (Historial y Registro)
+                    df_actualizado = pd.concat([df_ventas, pd.DataFrame([datos_nuevo_boleto])], ignore_index=True)
+                    conn.update(worksheet="Ventas", data=df_actualizado)
+                    
+                    # Generar PDF
+                    archivo_pdf = generar_pdf_boleto(datos_nuevo_boleto)
+
+                st.success("¡Pago procesado con éxito y registrado en el historial!")
+                st.info(f"Tu código de confirmación de pago es: **{codigo_pago}**")
                 
-            st.download_button(
-                label="📥 Descargar Comprobante (PDF)",
-                data=pdf_bytes,
-                file_name=archivo_pdf,
-                mime="application/pdf"
-            )
+                with open(archivo_pdf, "rb") as pdf_file:
+                    pdf_bytes = pdf_file.read()
+                    
+                st.download_button(
+                    label="📥 Descargar mi Comprobante en PDF",
+                    data=pdf_bytes,
+                    file_name=archivo_pdf,
+                    mime="application/pdf",
+                    key="btn_descarga"
+                )
+                
+                st.success("💡 *El formulario se ha procesado. Puedes actualizar la página o comprar otro boleto disponible.*")
 
 if __name__ == "__main__":
     main()
