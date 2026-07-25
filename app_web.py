@@ -80,7 +80,7 @@ def main():
     if conn is None or df_ventas is None:
         return
 
-    # Inicializar session_state para evitar pérdida de datos en intentos fallidos
+    # Inicializar session_state para los campos editables
     if "input_nombre" not in st.session_state:
         st.session_state.input_nombre = ""
     if "input_correo" not in st.session_state:
@@ -125,52 +125,46 @@ def main():
             st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa han sido vendidos.")
             return
 
-        # Formulario de datos con retención de información ante errores
-        nombre = st.text_input("Nombre completo:", value=st.session_state.input_nombre)
-        correo = st.text_input("Correo electrónico:", value=st.session_state.input_correo)
+        # Campos editables usando keys vinculados a session_state para limpiar correctamente
+        nombre = st.text_input("Nombre completo:", key="input_nombre")
+        correo = st.text_input("Correo electrónico:", key="input_correo")
         evento = st.text_input("Evento:", value="Rifa de celular", disabled=True)
         
-        st.markdown("**Selecciona tu número de boleto (los no disponibles aparecen en color más claro y no se pueden seleccionar):**")
-
-        # Tabla interactiva en forma de cuadrícula de 10x10 para seleccionar boletos
         selected_ticket = st.session_state.selected_ticket
-        
-        for fila in range(10):
-            cols_btn = st.columns(10)
-            for col_idx in range(10):
-                num = fila * 10 + col_idx
-                num_str = f"{num:03d}"
-                vendido = num_str in boletos_vendidos
-                
-                with cols_btn[col_idx]:
-                    if vendido:
-                        # Botón deshabilitado para boletos no disponibles (aparece en tono más claro / inactivo)
-                        st.button(f"{num_str}", key=f"sel_{num_str}", disabled=True, use_container_width=True)
-                    else:
-                        # Botón interactivo para boletos disponibles
-                        is_current = (selected_ticket == num_str)
-                        label = f"[{num_str}]" if is_current else f"{num_str}"
-                        if st.button(label, key=f"sel_{num_str}", use_container_width=True):
-                            st.session_state.selected_ticket = num_str
-                            st.rerun()
+
+        # Tabla desplegable / expandible para seleccionar números
+        with st.expander("🎫 Desplegar tabla para seleccionar número de boleto", expanded=(selected_ticket is None)):
+            st.markdown("Los boletos no disponibles aparecen en color más claro y no se pueden seleccionar:")
+            for fila in range(10):
+                cols_btn = st.columns(10)
+                for col_idx in range(10):
+                    num = fila * 10 + col_idx
+                    num_str = f"{num:03d}"
+                    vendido = num_str in boletos_vendidos
+                    
+                    with cols_btn[col_idx]:
+                        if vendido:
+                            st.button(f"{num_str}", key=f"sel_{num_str}", disabled=True, use_container_width=True)
+                        else:
+                            is_current = (selected_ticket == num_str)
+                            label = f"[{num_str}]" if is_current else f"{num_str}"
+                            if st.button(label, key=f"sel_{num_str}", use_container_width=True):
+                                st.session_state.selected_ticket = num_str
+                                st.rerun()
 
         if selected_ticket:
             st.success(f"🎯 Boleto seleccionado: **N° {selected_ticket}**")
         else:
-            st.info("👆 Haz clic en un número disponible de la tabla superior para seleccionarlo.")
+            st.info("👆 Haz clic en el recuadro superior para desplegar y seleccionar tu número.")
 
         st.write(f"**Monto a pagar:** ${precio_base:.2f} MXN")
         
         # Métodos de pago solicitados: Transferencia y Tarjeta
-        metodo_pago = st.radio("Método de Pago:", ["Transferencia", "Tarjeta"])
+        metodo_pago = st.radio("Método de Pago:", ["Transferencia", "Tarjeta"], key="metodo_pago")
         
-        pago_realizado = st.checkbox("Confirmo que el pago ha sido efectuado correctamente.")
+        pago_realizado = st.checkbox("Confirmo que el pago ha sido efectuado correctamente.", key="chk_pago")
         
         submit_compra = st.button("💳 Registrar Compra y Generar Boleto")
-
-        # Guardar en tiempo real en session_state para evitar pérdidas si hay fallo
-        st.session_state.input_nombre = nombre
-        st.session_state.input_correo = correo
 
         if submit_compra:
             if not selected_ticket:
@@ -218,14 +212,13 @@ def main():
                     key="btn_descarga"
                 )
                 
-                # Vaciar campos y selección tras registro exitoso
+                # Vaciar campos editables y selección para un nuevo registro
                 st.session_state.input_nombre = ""
                 st.session_state.input_correo = ""
                 st.session_state.selected_ticket = None
                 
-                st.success("🔄 *Los campos se han vaciado y el boleto seleccionado ya aparece como no disponible.*")
-                if st.button("🔄 Actualizar interfaz"):
-                    st.rerun()
+                st.success("🔄 *Los campos se han limpiado y las tablas se han actualizado para un nuevo registro.*")
+                st.rerun()
 
 if __name__ == "__main__":
     main()
