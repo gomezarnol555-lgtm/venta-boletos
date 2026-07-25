@@ -1,3 +1,4 @@
+import mercadopago
 import os
 import random
 from datetime import datetime, timedelta
@@ -31,6 +32,9 @@ MP_ACCESS_TOKEN = obtener_config("MP_ACCESS_TOKEN")
 MP_NOTIFICATION_URL = obtener_config("MP_NOTIFICATION_URL")
 MP_RETURN_URL = obtener_config("MP_RETURN_URL")
 MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
+
+# Agrega credenciales e inicializa la biblioteca de Mercado Pago Server-Side
+sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 # -----------------------------
 # Estilos CSS
