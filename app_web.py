@@ -53,7 +53,7 @@ def generar_pdf_boleto(datos_boleto):
     return nombre_archivo
 
 def obtener_datos_gsheets():
-    """Obtiene el inventario y ventas desde Google Sheets con manejo de errores detallado."""
+    """Obtiene el inventario y ventas desde Google Sheets con manejo de errores."""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df_ventas = conn.read(worksheet="Ventas", ttl=0)
@@ -68,7 +68,7 @@ def obtener_datos_gsheets():
             
         return conn, df_ventas
     except Exception as e:
-        st.error(f"⚠️ Error detallado de conexión con Google Sheets: {e}")
+        st.error(f"⚠️ Error al conectar con Google Sheets: {e}")
         return None, None
 
 def main():
@@ -79,63 +79,85 @@ def main():
     if conn is None or df_ventas is None:
         return
 
+    # Preservar el estado de los inputs si hay un intento fallido
+    if "input_nombre" not in st.session_state:
+        st.session_state.input_nombre = ""
+    if "input_correo" not in st.session_state:
+        st.session_state.input_correo = ""
+
     # --- CONFIGURACIÓN DE 100 BOLETOS (000 al 099) ---
-    precio_base = 100.00 # Puedes cambiar el precio del boleto aquí si lo deseas
+    precio_base = 100.00 
     
-    lista_inventario = []
     boletos_vendidos = []
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
-        # Aseguramos limpiar y leer los números de boletos ya comprados
-        boletos_vendidos = df_ventas["Numero_Boleto"].dropna().astype(str).values
+        boletos_vendidos = [f"{int(x):03d}" for x in df_ventas["Numero_Boleto"].dropna().values]
 
-    for i in range(100):
-        num_str = f"{i:03d}" # Formato de 3 dígitos (000, 001, ..., 099)
-        estado = "Vendido ❌" if num_str in boletos_vendidos else "Disponible ✅"
-        lista_inventario.append({
-            "Boleto N°": num_str,
-            "Precio": f"${precio_base:.2f} MXN",
-            "Estado": estado
-        })
+    # Construir mapa de disponibilidad
+    matriz_boletos = []
+    boletos_libres = []
     
-    df_inventario = pd.DataFrame(lista_inventario)
+    for i in range(100):
+        num_str = f"{i:03d}"
+        esta_vendido = num_str in boletos_vendidos
+        if not esta_vendido:
+            boletos_libres.append(num_str)
+        
+        # Etiqueta visual para la tabla
+        estado_label = f"{num_str} ❌" if esta_vendido else f"{num_str} ✅"
+        matriz_boletos.append(estado_label)
 
-    col1, col2 = st.columns([1.2, 1])
+    # Crear formato de tabla de 10 columnas por 10 filas para visualización panorámica
+    columnas_grid = [f"Col {i+1}" for i in range(10)]
+    filas_grid = [matriz_boletos[i:i+10] for i in range(0, 100, 10)]
+    df_grid = pd.DataFrame(filas_grid, columns=columnas_grid)
+
+    col1, col2 = st.columns([1.3, 1])
 
     with col1:
-        st.subheader("📋 Tabla de Disponibilidad (000 al 099)")
-        st.dataframe(df_inventario, use_container_width=True, height=400, hide_index=True)
-        st.info("💡 Los boletos marcados como 'Vendido ❌' ya están ocupados. Elige uno disponible.")
+        st.subheader("📋 Panel Visual de Boletos (000 al 099)")
+        st.write("Observa el estado de todos los números disponibles (✅) y vendidos (❌):")
+        st.dataframe(df_grid, use_container_width=True, hide_index=True)
+        st.caption("✅ = Disponible | ❌ = No disponible / Vendido")
 
     with col2:
         st.subheader("🛒 Registro de Compra")
         
-        boletos_libres = [item["Boleto N°"] for item in lista_inventario if item["Estado"] == "Disponible ✅"]
-        
         if not boletos_libres:
-            st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa están agotados.")
+            st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa han sido vendidos.")
             return
 
-        with st.form("form_compra", clear_on_submit=True):
-            nombre = st.text_input("Nombre completo:")
-            correo = st.text_input("Correo electrónico:")
-            evento = st.text_input("Nombre del evento:", value="Rifa de celular")
-            boleto_seleccionado = st.selectbox("Selecciona tu número de boleto disponible:", boletos_libres)
-            
-            st.markdown("---")
-            st.write(f"**Monto a pagar:** ${precio_base:.2f} MXN")
-            metodo_pago = st.radio("Método de Pago:", ["Transferencia SPEI", "Efectivo / Enlace directo"])
-            
-            pago_realizado = st.checkbox("Confirmo que el pago ha sido efectuado correctamente.")
-            
-            submit_compra = st.form_submit_button("💳 Registrar Compra y Generar Boleto")
+        # Formulario interactivo conservando la información
+        nombre = st.text_input("Nombre completo:", value=st.session_state.input_nombre)
+        correo = st.text_input("Correo electrónico:", value=st.session_state.input_correo)
+        evento = st.text_input("Evento:", value="Rifa de celular", disabled=True)
+        
+        # Selección del número disponible en la lista desplegable
+        boleto_seleccionado = st.selectbox(
+            "Selecciona tu número de boleto disponible:", 
+            options=boletos_libres
+        )
+        
+        st.markdown("---")
+        st.write(f"**Monto a pagar:** ${precio_base:.2f} MXN")
+        
+        # Opciones ajustadas a Transferencia y Tarjeta
+        metodo_pago = st.radio("Método de Pago:", ["Transferencia", "Tarjeta"])
+        
+        pago_realizado = st.checkbox("Confirmo que el pago ha sido efectuado correctamente.")
+        
+        submit_compra = st.button("💳 Registrar Compra y Generar Boleto")
+
+        # Guardar cambios inmediatamente en el estado
+        st.session_state.input_nombre = nombre
+        st.session_state.input_correo = correo
 
         if submit_compra:
-            if not nombre or not correo or not evento:
-                st.error("⚠️ Por favor completa todos los campos del formulario.")
+            if not nombre or not correo:
+                st.error("⚠️ Por favor completa tu nombre y correo antes de continuar. Tus datos no se perderán.")
             elif not pago_realizado:
-                st.warning("⚠️ Debes confirmar que el pago ha sido efectuado para poder registrar el boleto.")
+                st.warning("⚠️ Debes marcar la casilla para confirmar que el pago fue realizado.")
             else:
-                with st.spinner('Validando pago y registrando en la nube...'):
+                with st.spinner('Procesando pago y actualizando inventario...'):
                     id_boleto = f"RIFA-{int(datetime.now().timestamp())}"
                     codigo_pago = f"PAY-{random.randint(10000, 99999)}"
                     fecha_compra = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -151,29 +173,34 @@ def main():
                         "Fecha_Compra": fecha_compra
                     }
                     
-                    # Guardar permanentemente en Google Sheets
+                    # Actualizar hoja de cálculo en la nube
                     df_actualizado = pd.concat([df_ventas, pd.DataFrame([datos_nuevo_boleto])], ignore_index=True)
                     conn.update(worksheet="Ventas", data=df_actualizado)
                     
-                    # Generar PDF
+                    # Generar comprobante PDF
                     archivo_pdf = generar_pdf_boleto(datos_nuevo_boleto)
 
-                st.success("✅ ¡Boleto registrado con éxito en Google Sheets!")
-                st.info(f"Tu código de confirmación es: **{codigo_pago}**")
+                st.success("✅ ¡Registro completado exitosamente!")
+                st.info(f"Tu código de pago asignado: **{codigo_pago}**")
                 
                 with open(archivo_pdf, "rb") as pdf_file:
                     pdf_bytes = pdf_file.read()
                     
                 st.download_button(
-                    label="📥 Descargar mi Comprobante en PDF",
+                    label="📥 Descargar Comprobante PDF",
                     data=pdf_bytes,
                     file_name=archivo_pdf,
                     mime="application/pdf",
                     key="btn_descarga"
                 )
                 
-                st.success("🔄 *Los campos del formulario se han reiniciado. Ya puedes registrar otro boleto si lo deseas.*")
-                st.rerun()
+                # Reseteo de campos tras completar la transacción exitosamente
+                st.session_state.input_nombre = ""
+                st.session_state.input_correo = ""
+                
+                st.info("🔄 Haz clic abajo para actualizar la vista y ver tu número deshabilitado en la tabla.")
+                if st.button("🔄 Actualizar disponibilidad"):
+                    st.rerun()
 
 if __name__ == "__main__":
     main()
