@@ -93,7 +93,7 @@ def main():
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
         boletos_vendidos = [f"{int(x):03d}" for x in df_ventas["Numero_Boleto"].dropna().values]
 
-    # Construir mapa de disponibilidad general (los 100 boletos del 000 al 099)
+    # Construir mapa de disponibilidad general
     matriz_boletos = []
     for i in range(100):
         num_str = f"{i:03d}"
@@ -101,7 +101,6 @@ def main():
         estado_label = f"{num_str} ❌" if esta_vendido else f"{num_str} ✅"
         matriz_boletos.append(estado_label)
 
-    # DataFrame para la tabla de Disponibilidad
     columnas_unicas = [f"{' ' * i}" for i in range(10)]
     filas_grid = [matriz_boletos[i:i+10] for i in range(0, 100, 10)]
     df_grid = pd.DataFrame(filas_grid, columns=columnas_unicas)
@@ -117,20 +116,18 @@ def main():
     with col2:
         st.markdown("### 🛒 Registro de Compra")
         
-        # Verificar si hay boletos libres
         boletos_libres_count = 100 - len(boletos_vendidos)
         if boletos_libres_count <= 0:
             st.warning("⚠️ ¡Lo sentimos! Todos los boletos de la rifa han sido vendidos.")
             return
 
-        # Widgets con clave dinámica basada en form_id para permitir reseteo limpio sin errores
+        # Widgets con clave dinámica basada en form_id para vaciarse al incrementar el ID
         nombre = st.text_input("Nombre completo:", key=f"nombre_{st.session_state.form_id}")
         correo = st.text_input("Correo electrónico:", key=f"correo_{st.session_state.form_id}")
         evento = st.text_input("Evento:", value="Rifa de celular", disabled=True, key=f"evento_{st.session_state.form_id}")
         
         selected_ticket = st.session_state.selected_ticket
 
-        # Tabla desplegable / expandible para seleccionar números
         with st.expander("🎫 Desplegar tabla para seleccionar número de boleto", expanded=(selected_ticket is None)):
             st.markdown("Los boletos no disponibles aparecen en color más claro y no se pueden seleccionar:")
             for fila in range(10):
@@ -157,9 +154,7 @@ def main():
 
         st.write(f"**Monto a pagar:** ${precio_base:.2f} MXN")
         
-        # Métodos de pago solicitados: Transferencia y Tarjeta
         metodo_pago = st.radio("Método de Pago:", ["Transferencia", "Tarjeta"], key=f"pago_{st.session_state.form_id}")
-        
         pago_realizado = st.checkbox("Confirmo que el pago ha sido efectuado correctamente.", key=f"chk_{st.session_state.form_id}")
         
         submit_compra = st.button("💳 Registrar Compra y Generar Boleto")
@@ -220,13 +215,12 @@ def main():
                     key="btn_descarga"
                 )
                 
-                # Incrementar form_id para vaciar los campos de texto sin error de Streamlit y limpiar selección
+                # Incrementar form_id para resetear celdas y limpiar selección automáticamente
                 st.session_state.form_id += 1
                 st.session_state.selected_ticket = None
                 
-                st.success("🔄 *Los campos se han limpiado y las tablas se han actualizado para un nuevo registro.*")
-                if st.button("🔄 Continuar con otro registro"):
-                    st.rerun()
+                # Recargar de inmediato la aplicación para reflejar cambios en la tabla y campos limpios
+                st.rerun()
 
 if __name__ == "__main__":
     main()
