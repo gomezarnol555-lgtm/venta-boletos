@@ -114,8 +114,11 @@ def generar_pdf_boleto(datos_boleto: Dict[str, Any]) -> str:
 def mp_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {MP_ACCESS_TOKEN}", "Content-Type": "application/json"}
 
-def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, monto, external_reference):
-    # Estructura requerida por el SDK de Mercado Pago manteniendo tu configuración
+# Adaptación para soportar Deep Linking si se consume desde una App Móvil nativa
+def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, monto, external_reference, custom_return_scheme: Optional[str] = None):
+    # En apps móviles (Flutter/React Native/iOS/Android), el return_url suele ser un esquema deep link (ej. "rifaapp://checkout")
+    url_retorno = custom_return_scheme if custom_return_scheme else MP_RETURN_URL
+    
     preference_data = {
         "items": [
             {
@@ -131,18 +134,18 @@ def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, mont
         },
         "external_reference": external_reference,
         "back_urls": {
-            "success": MP_RETURN_URL,
-            "pending": MP_RETURN_URL,
-            "failure": MP_RETURN_URL
+            "success": url_retorno,
+            "pending": url_retorno,
+            "failure": url_retorno
         },
         "auto_return": "approved",
     }
     
-    # Se genera la preferencia usando el método oficial del SDK
+    # Creación de preferencia usando el SDK oficial
     preference_response = sdk.preference().create(preference_data)
     preference = preference_response["response"]
     
-    # Se retorna el identificador único y el punto de inicio de pago (mantiene tu lógica)
+    # Retorna tanto el ID (para Apps Móviles) como la URL web (para navegadores)
     return preference.get("id", ""), preference.get("init_point", "")
 
 def obtener_pago_mercado_pago(payment_id: str) -> Dict[str, Any]:
@@ -192,7 +195,6 @@ def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -
 
 def registrar_reserva_cobro(conn: GSheetsConnection, orden: Dict[str, Any]) -> Tuple[bool, str]:
     try:
-        # Intentar leer la hoja Reservas
         try: 
             df_r = conn.read(worksheet="Reservas", ttl=0)
             if df_r.empty:
@@ -200,11 +202,9 @@ def registrar_reserva_cobro(conn: GSheetsConnection, orden: Dict[str, Any]) -> T
         except Exception: 
             df_r = pd.DataFrame(columns=columnas_reservas())
         
-        # Limpiar datos vacíos y asegurar columnas
         df_r = asegurar_columnas(df_r.dropna(how="all"), columnas_reservas())
         df_nuevo = asegurar_columnas(pd.DataFrame([orden]), columnas_reservas())
         
-        # Unir y actualizar
         df_actualizado = pd.concat([df_r, df_nuevo], ignore_index=True)
         conn.update(worksheet="Reservas", data=df_actualizado)
         
@@ -244,7 +244,6 @@ def renderizar_mapa_interactivo():
     st.markdown(html_metrics, unsafe_allow_html=True)
     st.markdown("Haz clic en un boleto 🟢 **Verde** para seleccionarlo.")
 
-    # Generar cuadrícula nativa clicable
     for fila in range(10):
         cols = st.columns(10)
         for col_idx in range(10):
@@ -275,7 +274,6 @@ def main():
 
     if "selected_ticket" not in st.session_state: st.session_state.selected_ticket = None
 
-    # Lógica de confirmación de pago
     qp = st.query_params
     if "payment_id" in qp and "status" in qp and qp["status"] == "approved":
         st.success(f"✅ ¡Pago detectado! (ID: {qp['payment_id']})")
@@ -305,6 +303,10 @@ def main():
                 correo = st.text_input("Correo electrónico:")
                 telefono = st.text_input("Número de WhatsApp / Celular:")
                 
+                # Checkbox opcional por si el usuario quiere probar la lógica de retorno de un frontend móvil (Deep Linking)
+                is_mobile_app = st.checkbox("📲 ¿Es una orden desde App Móvil? (Deep Link)", value=False)
+                custom_scheme = st.text_input("Esquema de la app (ej: miapp://checkout):", value="rifaapp://pago") if is_mobile_app else None
+                
                 st.write(f"**Total:** ${precio_base:.2f} MXN")
 
                 if st.button("💳 Reservar y Pagar", type="primary", use_container_width=True):
@@ -330,18 +332,36 @@ def main():
                             "Fecha_Actualizacion": fecha.strftime("%Y-%m-%d %H:%M:%S"),
                         }
 
-                        # Guardamos recibiendo el estado y el mensaje exacto de error
                         exito, mensaje_error = registrar_reserva_cobro(conn, reserva)
                         
                         if exito:
                             try:
-                                pref_id, url_pago = crear_preferencia_mercado_pago(nombre, correo, telefono, ticket, precio_base, ref_externa)
+                                pref_id, url_pago = crear_preferencia_mercado_pago(nombre, correo, telefono, ticket, precio_base, ref_externa, custom_scheme)
                                 st.success(f"✅ ¡Boleto bloqueado! Tienes {TIEMPO_RESERVA_MINUTOS} minutos para pagar.")
-                                st.link_button("Ir a Mercado Pago ➔", url_pago, type="primary", use_container_width=True)
+                                
+                                # Separación clara entre el consumo Web y la integración con Aplicaciones Móviles
+                                tab_web, tab_movil = st.tabs(["🌐 Pago Web (Navegador)", "📲 Integración App Móvil"])
+                                
+                                with tab_web:
+                                    st.write("Si estás en un navegador tradicional, haz clic en el siguiente botón:")
+                                    st.link_button("Ir a Mercado Pago ➔", url_pago, type="primary", use_container_width=True)
+                                    
+                                with tab_movil:
+                                    st.markdown("### Configuración para Frontend Móvil")
+                                    st.write("Para **Flutter**, **React Native** (CLI/Expo), **Android** (Kotlin/Java) o **iOS** (Swift), **no** utilices el enlace web. En tu aplicación, inicia el SDK enviando este **ID de Preferencia**:")
+                                    st.code(pref_id, language="text")
+                                    
+                                    with st.expander("🛠️ Ver cómo usar este ID en tu código de Frontend Móvil"):
+                                        st.markdown("**React Native / Expo / Flutter:**")
+                                        st.code(f'// Al recibir el ID desde este servidor:\nstartCheckout({{ preferenceId: "{pref_id}" }});', language="javascript")
+                                        st.markdown("**Android (Kotlin/Java):**")
+                                        st.code(f'// Iniciar Checkout nativo con el ID:\nMercadoPagoCheckout.Builder("TU_PUBLIC_KEY", "{pref_id}").build().startPayment(this, REQUEST_CODE)', language="kotlin")
+                                        st.markdown("**iOS (Swift):**")
+                                        st.code(f'// Iniciar Checkout nativo con el ID:\nlet checkout = MercadoPagoCheckout(builder: MercadoPagoCheckoutBuilder(publicKey: "TU_PUBLIC_KEY", preferenceId: "{pref_id}"))\ncheckout.start(navigationController: self.navigationController!)', language="swift")
+                                        
                             except Exception as e:
                                 st.error(f"⚠️ Error creando el pago en Mercado Pago: {e}")
                         else:
-                            # Aquí se mostrará por qué está fallando Google Sheets
                             st.error(f"⚠️ No se pudo guardar en Google Sheets. DETALLE DEL ERROR: {mensaje_error}")
 
 if __name__ == "__main__":
