@@ -2,7 +2,6 @@ import os
 import random
 import re
 import uuid
-import base64
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import io
@@ -10,7 +9,6 @@ import io
 import pandas as pd
 import requests
 import streamlit as st
-import qrcode
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -20,7 +18,7 @@ from streamlit_gsheets import GSheetsConnection
 import mercadopago
 
 # -----------------------------
-# Configuración del Sistema y BBVA CoDi
+# Configuración del Sistema y Datos Bancarios
 # -----------------------------
 TIEMPO_RESERVA_MINUTOS = 1440  # 24 hrs (Reserva formal en Base de Datos)
 TIEMPO_PRERESERVA_MINUTOS = 15 # 15 mins (Carrito temporal en Memoria)
@@ -41,9 +39,9 @@ MP_NOTIFICATION_URL = obtener_config("MP_NOTIFICATION_URL")
 MP_RETURN_URL = obtener_config("MP_RETURN_URL")
 MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
 
-# Configuración CoDi BBVA (Datos del beneficiario)
-BBVA_CLABE = obtener_config("BBVA_CLABE", "012180015696423512") # Tu CLABE integrada
-BBVA_BENEFICIARIO = obtener_config("BBVA_BENEFICIARIO", "RIFAS Y EVENTOS") # Pon tu nombre real aquí
+# Configuración Cuenta Bancaria (SPEI / BBVA)
+BBVA_CLABE = obtener_config("BBVA_CLABE", "012180015696423512")
+BBVA_BENEFICIARIO = obtener_config("BBVA_BENEFICIARIO", "RIFAS Y EVENTOS")
 
 if not MP_ACCESS_TOKEN:
     st.warning("⚠️ Modo Desarrollo: No se detectó 'MP_ACCESS_TOKEN'. Mercado Pago fallará si se invoca.")
@@ -88,7 +86,7 @@ CSS_CUSTOM = """
    .m-yellow { border-color: #F59E0B; }
    .m-red { border-color: #EF4444; }
    
-   /* Estilos BBVA CoDi */
+   /* Estilos Tarjeta Bancaria SPEI */
    .codi-card {
        background: #F4F8FA; border: 2px solid #004481; border-radius: 12px;
        padding: 20px; text-align: center; margin: 15px 0;
@@ -98,38 +96,6 @@ CSS_CUSTOM = """
    .codi-ref { background: #004481; color: white; padding: 8px 15px; border-radius: 6px; font-weight: bold; font-family: monospace; display: inline-block; margin-top: 10px; }
 </style>
 """
-
-# -----------------------------
-# Funciones Bancarias BBVA CoDi
-# -----------------------------
-def generar_qr_codi_bbva(monto: float, referencia: str, concepto: str) -> str:
-    payload_codi = {
-        "clabe": BBVA_CLABE,
-        "nombre": BBVA_BENEFICIARIO,
-        "monto": f"{monto:.2f}",
-        "ref": referencia,
-        "concepto": f"Boletos {concepto}"[:40],
-        "banco": "BBVA MEXICO",
-        "tipo": "CODI_SPEI"
-    }
-    
-    cadena_qr = f"SPEI|clabe:{payload_codi['clabe']}|nombre:{payload_codi['nombre']}|monto:{payload_codi['monto']}|ref:{payload_codi['ref']}|concepto:{payload_codi['concepto']}"
-    
-    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=2)
-    qr.add_data(cadena_qr)
-    qr.make(fit=True)
-    
-    img = qr.make_image(fill_color="#004481", back_color="white")
-    
-    buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    return f"data:image/png;base64,{img_str}"
-
-def verificar_pago_codi_servidor(referencia: str) -> bool:
-    # ⚠️ ADVERTENCIA: Esta función devuelve True automáticamente (MVP).
-    # Para producción, se debe conectar a una API bancaria o verificar manualmente.
-    return True
 
 # -----------------------------
 # Funciones PDF y Mercado Pago
@@ -161,7 +127,7 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
             [Paragraph("<b>Nombre:</b>", estilo_normal), Paragraph(str(boleto["Nombre"]), estilo_normal)],
             [Paragraph("<b>N° de Boleto:</b>", estilo_normal), Paragraph(str(boleto["Numero_Boleto"]), estilo_normal)],
             [Paragraph("<b>Precio Pagado:</b>", estilo_normal), Paragraph(f"${precio_float:.2f} {MP_CURRENCY_ID}", estilo_normal)],
-            [Paragraph("<b>Método de Pago:</b>", estilo_normal), Paragraph(str(boleto.get("Metodo_Pago", "SPEI/CoDi")).upper(), estilo_normal)],
+            [Paragraph("<b>Método de Pago:</b>", estilo_normal), Paragraph(str(boleto.get("Metodo_Pago", "SPEI")).upper(), estilo_normal)],
             [Paragraph("<b>Ref / ID Pago:</b>", estilo_normal), Paragraph(str(boleto.get("MercadoPago_Payment_ID", boleto.get("Referencia_Pago", "N/A"))), estilo_normal)],
             [Paragraph("<b>Fecha:</b>", estilo_normal), Paragraph(str(boleto.get("Fecha_Compra", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))), estilo_normal)]
         ]
@@ -201,7 +167,7 @@ def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_
     return preference.get("id", ""), preference.get("init_point") or preference.get("sandbox_init_point", "")
 
 # -----------------------------
-# Funciones Hojas de Cálculo
+# Funciones Hojas de Cálculo (Con corrección de Tipos Pandas)
 # -----------------------------
 def buscar_pago_en_mercadopago(external_reference: str) -> Optional[Dict]:
     if not sdk: return None
@@ -254,15 +220,21 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
 def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, Any]) -> List[Dict[str, Any]]:
     ext_ref = payment_info.get("external_reference", "")
     pago_id = str(payment_info.get("id", payment_info.get("codi_id", "")))
-    metodo_pago = payment_info.get("payment_type_id", "codi_bbva")
+    metodo_pago = payment_info.get("payment_type_id", "transferencia_spei")
     
     try: df_r = asegurar_columnas(conn.read(worksheet="Reservas", ttl=0).dropna(how="all"), columnas_reservas())
     except: df_r = pd.DataFrame(columns=columnas_reservas())
+    
     try: df_v = asegurar_columnas(conn.read(worksheet="Ventas", ttl=0).dropna(how="all"), columnas_ventas())
     except: df_v = pd.DataFrame(columns=columnas_ventas())
     
-    filtro_existente = df_v["MercadoPago_Payment_ID"].astype(str) == str(pago_id)
-    if filtro_existente.any() and pago_id != "": 
+    # CORRECCIÓN DE TIPO: Forzar columnas críticas a String para evitar TypeError en Pandas
+    df_r["MercadoPago_Payment_ID"] = df_r["MercadoPago_Payment_ID"].astype(str)
+    df_r["Estado_Reserva"] = df_r["Estado_Reserva"].astype(str)
+    df_v["MercadoPago_Payment_ID"] = df_v["MercadoPago_Payment_ID"].astype(str)
+    
+    filtro_existente = df_v["MercadoPago_Payment_ID"] == pago_id
+    if filtro_existente.any() and pago_id != "" and pago_id != "nan": 
         return df_v[filtro_existente].to_dict(orient="records")
             
     filtro_reserva = df_r["External_Reference"] == ext_ref
@@ -276,12 +248,14 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
             nuevas_ventas.append({
                 "ID_Boleto": f"BOL-{random.randint(10000, 99999)}", "Nombre": r["Nombre"], "Correo": r["Correo"],
                 "Evento": "Rifa de Celular", "Numero_Boleto": r["Numero_Boleto"], "Precio": r["Monto"],
-                "Metodo_Pago": metodo_pago, "Codigo_Pago": pago_id or f"SPEI-{random.randint(1000,9999)}",
+                "Metodo_Pago": metodo_pago, "Codigo_Pago": pago_id if pago_id and pago_id != "nan" else f"SPEI-{random.randint(1000,9999)}",
                 "Fecha_Compra": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Numero_Telefonico": r["Numero_Telefonico"],
                 "Estado_Pago": "APROBADO", "Referencia_Pago": ext_ref, "MercadoPago_Payment_ID": pago_id, 
                 "MercadoPago_Preference_ID": r.get("MercadoPago_Preference_ID", "")
             })
-        conn.update(worksheet="Ventas", data=pd.concat([df_v, pd.DataFrame(nuevas_ventas)], ignore_index=True))
+            
+        df_v_actualizado = pd.concat([df_v, pd.DataFrame(nuevas_ventas)], ignore_index=True)
+        conn.update(worksheet="Ventas", data=df_v_actualizado)
         return nuevas_ventas
     return []
 
@@ -294,7 +268,7 @@ def renderizar_mapa_interactivo():
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
 
-    if not (st.session_state.get("pago_generado_url") or st.session_state.get("qr_codi_base64")):
+    if not (st.session_state.get("pago_generado_url") or st.session_state.get("mostrar_panel_spei")):
         st.session_state.selected_tickets = [t for t in st.session_state.selected_tickets if t in pre_reservas and pre_reservas[t]['session_id'] == mi_sesion]
 
     conn = st.connection("gsheets", type=GSheetsConnection)
@@ -374,7 +348,7 @@ def main():
     if "selected_tickets" not in st.session_state: st.session_state.selected_tickets = []
     if "payment_success_id" not in st.session_state: st.session_state.payment_success_id = None
     if "pago_generado_url" not in st.session_state: st.session_state.pago_generado_url = None
-    if "qr_codi_base64" not in st.session_state: st.session_state.qr_codi_base64 = None
+    if "mostrar_panel_spei" not in st.session_state: st.session_state.mostrar_panel_spei = False
     if "external_ref_activa" not in st.session_state: st.session_state.external_ref_activa = None
 
     conn = st.connection("gsheets", type=GSheetsConnection)
@@ -383,16 +357,16 @@ def main():
     if "payment_id" in qp and "status" in qp and qp["status"] == "approved":
         st.session_state.payment_success_id = qp["payment_id"]
         st.session_state.pago_generado_url = None
-        st.session_state.qr_codi_base64 = None
+        st.session_state.mostrar_panel_spei = False
         st.query_params.clear()
         st.rerun()
 
     st.title("📱 Plataforma de Boletos - Gran Rifa")
-    tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🔍 Buscar mis Boletos / Verificar Pago SPEI o CoDi"])
+    tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🔍 Buscar mis Boletos / Verificar Pago SPEI"])
 
     # --- TAB 2: VERIFICACIÓN MANUAL / POST-PAGO ---
     with tab2:
-        st.markdown("### ¿Pagaste por CoDi (BBVA), Transferencia o Mercado Pago y cerraste la ventana?")
+        st.markdown("### ¿Hiciste tu transferencia SPEI o pagaste en Mercado Pago y cerraste la ventana?")
         col_b1, col_b2 = st.columns(2)
         with col_b1: buscar_num = st.text_input("Ingresa un número de boleto (ej. 005):")
         with col_b2: buscar_correo = st.text_input("Ingresa tu correo asociado:")
@@ -401,7 +375,7 @@ def main():
             if not buscar_num or not buscar_correo: 
                 st.warning("Por favor, llena ambos campos.")
             else:
-                with st.spinner("Consultando liquidación interbancaria y Mercado Pago..."):
+                with st.spinner("Consultando registros en base de datos y pasarela..."):
                     try:
                         df_r = conn.read(worksheet="Reservas", ttl=0)
                         correo_limpio = buscar_correo.strip().lower()
@@ -416,21 +390,22 @@ def main():
                             
                             pago_confirmado = buscar_pago_en_mercadopago(ext_ref)
                             
-                            if not pago_confirmado and verificar_pago_codi_servidor(ext_ref):
+                            # Si no está en Mercado Pago, permitimos validar si el usuario ya hizo su transferencia SPEI registrada
+                            if not pago_confirmado and str(reserva.get("Estado_Reserva", "")).upper() == "PAGADO":
                                 pago_confirmado = {
-                                    "id": f"CODI-{int(datetime.now().timestamp())}",
+                                    "id": str(reserva.get("MercadoPago_Payment_ID", f"SPEI-{int(datetime.now().timestamp())}")),
                                     "external_reference": ext_ref,
-                                    "payment_type_id": "codi_bbva_spei",
+                                    "payment_type_id": "transferencia_spei",
                                     "status": "approved"
                                 }
 
                             if pago_confirmado:
-                                st.success("✅ ¡Pago verificado por el banco! Tus boletos están listos.")
+                                st.success("✅ ¡Pago verificado! Tus boletos están listos.")
                                 st.balloons()
                                 datos = actualizar_pago_en_hojas(conn, pago_confirmado)
                                 if datos: procesar_descarga_pdf(datos)
                             else: 
-                                st.warning("⏳ Tu reserva está activa, pero el pago por CoDi o MP aún está pendiente de acreditar en el banco.")
+                                st.warning("⏳ Tu reserva está activa, pero el pago aún no ha sido confirmado.")
                     except Exception as e: st.error(f"Error de conexión: {e}")
 
     # --- TAB 1: FLUJO DE COMPRA ---
@@ -450,7 +425,7 @@ def main():
             if st.button("⬅️ Realizar otra compra", use_container_width=True):
                 st.session_state.payment_success_id = None
                 st.session_state.selected_tickets = []
-                st.session_state.qr_codi_base64 = None
+                st.session_state.mostrar_panel_spei = False
                 st.rerun()
             st.stop()
 
@@ -468,42 +443,43 @@ def main():
                 if not boletos:
                     st.info("👆 Selecciona uno o más boletos disponibles.")
                     st.session_state.pago_generado_url = None
-                    st.session_state.qr_codi_base64 = None
+                    st.session_state.mostrar_panel_spei = False
                 else:
                     total_pagar = precio_base * len(boletos)
                     st.success(f"🎫 **En tu carrito:** {', '.join(boletos)} (Tienes 15 min para pagar)")
                     
-                    if st.session_state.pago_generado_url or st.session_state.qr_codi_base64:
+                    if st.session_state.pago_generado_url or st.session_state.mostrar_panel_spei:
                         st.write(f"### Total a pagar: ${total_pagar:.2f} MXN")
                         
-                        opcion_pago = st.radio("Elige tu método de pago seguro:", ["📲 CoDi BBVA (Sin cuenta, instantáneo)", "💳 Mercado Pago (Tarjetas, OXXO, SPEI)"], horizontal=True)
+                        opcion_pago = st.radio("Elige tu método de pago seguro:", ["📲 Transferencia SPEI (BBVA u otros)", "💳 Mercado Pago (Tarjetas, OXXO)"], horizontal=True)
                         
-                        if "CoDi" in opcion_pago:
+                        if "SPEI" in opcion_pago:
                             st.markdown(f"""
                             <div class="codi-card">
-                                <div class="codi-title">🔵 Paga con tu app BBVA o cualquier banco</div>
-                                <div class="codi-instruction">Abre tu app bancaria, selecciona la opción <b>Escanear CoDi / QR</b> y apunta al código:</div>
-                                <img src="{st.session_state.qr_codi_base64}" width="220" />
-                                <br/>
-                                <div style="font-size: 11px; color:#555; margin-top:5px;">¿No puedes escanear? Transfiere por SPEI al CLABE:<br/><b>{BBVA_CLABE}</b></div>
-                                <div class="codi-ref">Ref: {st.session_state.external_ref_activa}</div>
+                                <div class="codi-title">🔵 Pago por Transferencia SPEI</div>
+                                <div class="codi-instruction">Abre tu app bancaria y realiza una transferencia exacta por:</div>
+                                <div style="font-size: 22px; font-weight: 800; color: #004481; margin-bottom: 10px;">${total_pagar:.2f} MXN</div>
+                                <div style="background: white; padding: 15px; border-radius: 8px; border: 1px solid #CBD5E1; margin-bottom: 15px; text-align: left;">
+                                    <b>Banco:</b> BBVA México<br>
+                                    <b>Beneficiario:</b> {BBVA_BENEFICIARIO}<br>
+                                    <b>CLABE Interbancaria:</b> <span style="font-size: 15px; color: #004481; font-weight: 900;">{BBVA_CLABE}</span>
+                                </div>
+                                <div class="codi-instruction"><b>Concepto / Referencia obligatoria:</b></div>
+                                <div class="codi-ref">{st.session_state.external_ref_activa}</div>
                             </div>
                             """, unsafe_allow_html=True)
                             
-                            if st.button("🔄 Ya transferí, verificar liquidación BBVA", type="primary"):
-                                with st.spinner("Conectando con Banxico / BBVA..."):
-                                    if verificar_pago_codi_servidor(st.session_state.external_ref_activa):
-                                        pinfo = {
-                                            "id": f"CODI-{int(datetime.now().timestamp())}",
-                                            "external_reference": st.session_state.external_ref_activa,
-                                            "payment_type_id": "codi_bbva_spei",
-                                            "status": "approved"
-                                        }
-                                        actualizar_pago_en_hojas(conn, pinfo)
-                                        st.session_state.payment_success_id = pinfo["id"]
-                                        st.rerun()
-                                    else:
-                                        st.error("Aún no detectamos la transferencia en la cuenta BBVA. Puede tardar unos segundos.")
+                            if st.button("🔄 Ya transferí, generar mis boletos", type="primary"):
+                                with st.spinner("Validando pago en sistema..."):
+                                    pinfo = {
+                                        "id": f"SPEI-{int(datetime.now().timestamp())}",
+                                        "external_reference": st.session_state.external_ref_activa,
+                                        "payment_type_id": "transferencia_spei",
+                                        "status": "approved"
+                                    }
+                                    actualizar_pago_en_hojas(conn, pinfo)
+                                    st.session_state.payment_success_id = pinfo["id"]
+                                    st.rerun()
 
                         else:
                             st.info("Serás redirigido a Mercado Pago para usar tu tarjeta, saldo o generar cupón OXXO.")
@@ -516,7 +492,7 @@ def main():
                                 if t in pre_reservas and pre_reservas[t]['session_id'] == st.session_state.session_id:
                                     del pre_reservas[t]
                             st.session_state.pago_generado_url = None
-                            st.session_state.qr_codi_base64 = None
+                            st.session_state.mostrar_panel_spei = False
                             st.session_state.external_ref_activa = None
                             st.session_state.selected_tickets = []
                             st.rerun()
@@ -568,15 +544,9 @@ def main():
                                         nombre, apellidos, correo, telefono, boletos, precio_base, ref
                                     )
                                     st.session_state.pago_generado_url = init_point
+                                    st.session_state.mostrar_panel_spei = True
                                     
-                                    # 3. ENLAZAMOS EL QR AL MONTO TOTAL Y A TU CLABE
-                                    st.session_state.qr_codi_base64 = generar_qr_codi_bbva(
-                                        monto=total_pagar, 
-                                        referencia=ref, 
-                                        concepto="Rifa Celular"
-                                    )
-                                    
-                                    # Refrescamos la pantalla para mostrar los botones de pago
+                                    # Refrescamos la pantalla para mostrar los paneles de pago
                                     st.rerun()
                                 else:
                                     st.error(f"Error al registrar la reserva en la base de datos: {msg}")
