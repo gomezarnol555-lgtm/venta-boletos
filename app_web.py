@@ -19,7 +19,8 @@ import mercadopago
 # -----------------------------
 # Configuración del Sistema
 # -----------------------------
-TIEMPO_RESERVA_MINUTOS = 15
+# EXPERTO: Aumentado a 24 horas (1440 minutos) para dar margen a pagos SPEI/OXXO
+TIEMPO_RESERVA_MINUTOS = 1440 
 
 def obtener_config(nombre: str, default: str = "") -> str:
     try:
@@ -85,9 +86,7 @@ def dibujar_fondo_autenticidad(canvas, doc):
     canvas.rect(24, 24, width - 48, height - 48, fill=0, stroke=1)
     canvas.restoreState()
 
-# MODIFICADO: Ahora recibe una LISTA de boletos y genera un PDF multipágina
 def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
-    # Usamos el Código de Pago general para el nombre del archivo
     codigo_pago = datos_boletos[0].get("Codigo_Pago", "Generico")
     nombre_archivo = f"Boletos_Oficiales_{codigo_pago}.pdf"
     
@@ -122,14 +121,12 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         ]))
         
         story.append(t)
-        # Agregar un salto de página si no es el último boleto
         if idx < len(datos_boletos) - 1:
             story.append(PageBreak())
             
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
 
-# MODIFICADO: Acepta una lista de boletos y procesa la cantidad correcta en MP
 def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_boletos: list, monto_unitario, external_reference, custom_return_scheme: Optional[str] = None):
     url_retorno = custom_return_scheme if custom_return_scheme else MP_RETURN_URL
     
@@ -228,7 +225,6 @@ def obtener_estado_boletos(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -
                 
     return estados
 
-# MODIFICADO: Recibe una lista de órdenes (para uno o varios boletos simultáneos)
 def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]:
     try:
         try: df_r = conn.read(worksheet="Reservas", ttl=0)
@@ -243,7 +239,6 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
     except Exception as e:
         return False, str(e)
 
-# MODIFICADO: Retorna una LISTA de diccionarios, procesando todos los boletos bajo la misma referencia
 def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, Any]) -> List[Dict[str, Any]]:
     ext_ref = payment_info.get("external_reference", "")
     pago_id = str(payment_info.get("id", ""))
@@ -257,17 +252,14 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
     df_r = asegurar_columnas(df_r, columnas_reservas())
     df_v = asegurar_columnas(df_v, columnas_ventas())
     
-    # Si ya existen ventas con ese ID de pago, devolverlas todas para el PDF
     filtro_existente = df_v["MercadoPago_Payment_ID"].astype(str) == str(pago_id)
     if filtro_existente.any():
         return df_v[filtro_existente].to_dict(orient="records")
             
-    # Si no existen, procesamos las reservas encontradas con la misma referencia de carrito
     filtro_reserva = df_r["External_Reference"] == ext_ref
     if filtro_reserva.any():
         reservas_encontradas = df_r[filtro_reserva]
         
-        # Actualizar reservas a PAGADO
         df_r.loc[filtro_reserva, "Estado_Reserva"] = "PAGADO"
         df_r.loc[filtro_reserva, "MercadoPago_Payment_ID"] = pago_id
         conn.update(worksheet="Reservas", data=df_r)
@@ -336,7 +328,6 @@ def renderizar_mapa_interactivo():
                 elif estado == "reservado":
                     st.button(f"🟡\n{num}", disabled=True, key=f"btn_{num}")
                 else:
-                    # MODIFICADO: Soporte para listas y deselección
                     is_selected = num in st.session_state.selected_tickets
                     etiqueta = f"✅\n{num}" if is_selected else f"🟢\n{num}"
                     
@@ -347,7 +338,6 @@ def renderizar_mapa_interactivo():
                             st.session_state.selected_tickets.append(num)
                         st.rerun()
 
-# MODIFICADO: Recibe lista para la descarga
 def procesar_descarga_pdf(datos_boletos: List[dict]):
     archivo_pdf = generar_pdf_boleto(datos_boletos)
     with open(archivo_pdf, "rb") as pdf_file:
@@ -367,7 +357,6 @@ def main():
     st.set_page_config(page_title="Rifa de Celular", page_icon="🎟️", layout="wide")
     st.markdown(CSS_CUSTOM, unsafe_allow_html=True)
 
-    # MODIFICADO: selected_tickets como lista
     if "selected_tickets" not in st.session_state: st.session_state.selected_tickets = []
     if "payment_success_id" not in st.session_state: st.session_state.payment_success_id = None
     if "pago_generado_url" not in st.session_state: st.session_state.pago_generado_url = None
@@ -403,7 +392,6 @@ def main():
                 with st.spinner("Conectando de forma segura con Mercado Pago y el Banco..."):
                     try:
                         df_r = conn.read(worksheet="Reservas", ttl=0)
-                        # Limpiamos espacios del input correo
                         correo_limpio = buscar_correo.strip().lower()
                         filtro = (df_r["Numero_Boleto"].astype(str).str.zfill(3) == str(buscar_num).strip().zfill(3)) & (df_r["Correo"].str.lower() == correo_limpio)
                         reservas_encontradas = df_r[filtro]
@@ -469,14 +457,13 @@ def main():
                     st.info("👆 Selecciona uno o más boletos disponibles en el mapa izquierdo.")
                     st.session_state.pago_generado_url = None
                 else:
-                    # Mostrar resumen de carrito
                     st.success(f"🎫 **Boletos seleccionados:** {', '.join(boletos_seleccionados)}")
                     precio_total = precio_base * len(boletos_seleccionados)
                     
                     if st.session_state.pago_generado_url:
                         st.info("Serás redirigido a Mercado Pago para elegir: Tarjeta, Transferencia o Efectivo.")
                         st.link_button("💳 Pagar con Mercado Pago ➔", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
-                        st.caption("🚨 Si pagas por Transferencia y cierras esta ventana, vuelve a entrar luego y usa la pestaña **'Buscar mis Boletos'** para descargar tu PDF.")
+                        st.caption("🚨 Tienes 24 horas para completar tu pago. El boleto quedará reservado durante ese tiempo.")
                         
                         st.write("---")
                         if st.button("Cancelar reserva actual"):
@@ -489,31 +476,40 @@ def main():
                         with col_ape:
                             apellidos = st.text_input("Apellidos:")
                             
-                        correo = st.text_input("Correo electrónico:")
-                        telefono = st.text_input("Número de WhatsApp / Celular (10 dígitos):", max_chars=10)
+                        # EXPERTO: Interfaz de correo dividida para un llenado profesional y libre de errores
+                        col_usr, col_dom = st.columns([3, 2.5])
+                        with col_usr:
+                            correo_usuario = st.text_input("Correo (sin @):", placeholder="ej. juanperez")
+                        with col_dom:
+                            dominio = st.selectbox("Extensión:", ["@gmail.com", "@hotmail.com", "@outlook.com", "@yahoo.com", "Otro..."])
+
+                        if dominio == "Otro...":
+                            correo = st.text_input("Ingresa tu correo completo:", placeholder="usuario@empresa.com")
+                        else:
+                            # Previene que si el usuario pone un "@" por error se duplique
+                            correo_limpio_usuario = correo_usuario.replace("@", "").strip()
+                            correo = f"{correo_limpio_usuario}{dominio}" if correo_limpio_usuario else ""
+
+                        telefono = st.text_input("Número de WhatsApp (10 dígitos):", max_chars=10)
                         
                         st.write(f"**Total a Pagar:** ${precio_total:.2f} MXN ({len(boletos_seleccionados)} boleto(s))")
 
                         if st.button("Reservar Boletos", type="primary", use_container_width=True):
-                            # LIMPIEZA DE DATOS Y VALIDACIÓN ESTRICTA EXPERTA
                             correo_limpio = correo.strip().lower()
-                            # Regex estricto: Requiere @, dominio, y TLD válido de al menos 2 letras (ej. rechaza .c y previene espacios)
                             correo_valido = re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}$", correo_limpio)
                             telefono_valido = telefono.isdigit() and len(telefono) == 10
 
-                            if not nombre or not apellidos or not correo or not telefono:
+                            if not nombre or not apellidos or not correo_usuario or not telefono:
                                 st.error("⚠️ Completa todos los campos para proceder.")
                             elif not correo_valido:
-                                st.error("⚠️ El formato del correo electrónico NO es válido. Revisa que no tenga espacios al final y contenga el dominio correcto.")
+                                st.error("⚠️ El formato del correo electrónico NO es válido. Revisa los datos ingresados.")
                             elif not telefono_valido:
                                 st.error("⚠️ El número telefónico debe contener exactamente 10 dígitos numéricos.")
                             else:
                                 nombre_completo = f"{nombre.strip()} {apellidos.strip()}"
-                                # Referencia externa única por transaccíon
                                 ref_externa = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
                                 fecha = datetime.now()
                                 
-                                # Creamos una lista de órdenes para insertar de golpe a Google Sheets
                                 ordenes = []
                                 for ticket in boletos_seleccionados:
                                     ordenes.append({
@@ -524,7 +520,7 @@ def main():
                                         "Nombre": nombre_completo,
                                         "Correo": correo_limpio,
                                         "Numero_Telefonico": telefono,
-                                        "Monto": float(precio_base),  # El precio unitario
+                                        "Monto": float(precio_base),
                                         "Estado_Reserva": "PENDIENTE",
                                         "Fecha_Creacion": fecha.strftime("%Y-%m-%d %H:%M:%S"),
                                         "Expira_En": (fecha + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
@@ -535,7 +531,6 @@ def main():
                                     exito, msj = registrar_reserva_cobro(conn, ordenes)
                                     if exito:
                                         try:
-                                            # Enviamos toda la lista a Mercado Pago para que cobre el total exacto
                                             pref_id, url_pago = crear_preferencia_mercado_pago(nombre, apellidos, correo_limpio, telefono, boletos_seleccionados, precio_base, ref_externa, None)
                                             if url_pago:
                                                 st.session_state.pago_generado_url = url_pago
