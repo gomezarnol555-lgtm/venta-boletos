@@ -47,19 +47,6 @@ MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 # -----------------------------
-# Funciones de Limpieza Estricta
-# -----------------------------
-def normalizar_telefono(telefono: Any) -> str:
-    """Elimina espacios, guiones, paréntesis y códigos de país para obtener 10 dígitos limpios."""
-    if pd.isna(telefono) or telefono is None:
-        return ""
-    solo_digitos = re.sub(r"\D", "", str(telefono))
-    # Si ingresaron el código +52 o 52 por error, tomamos exactamente los últimos 10 dígitos
-    if len(solo_digitos) >= 10:
-        return solo_digitos[-10:]
-    return solo_digitos
-
-# -----------------------------
 # Caché Global para Pre-Reservas (Memoria RAM)
 # -----------------------------
 @st.cache_resource
@@ -152,23 +139,12 @@ def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_
     url_retorno = custom_return_scheme if custom_return_scheme else MP_RETURN_URL
     titulos_boletos = ", ".join(numeros_boletos)
     
-    # Limpieza estricta de strings y normalización de teléfono
-    nombre_limpio = str(nombre).strip()
-    apellidos_limpios = str(apellidos).strip() or "Sin Apellido"
-    correo_limpio = str(correo).strip().lower()
-    telefono_limpio = normalizar_telefono(telefono)
-    
-    # Sincronización de expiración con formato ISO 8601 UTC requerido por Mercado Pago
-    fecha_expiracion_iso = (datetime.utcnow() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    
     preference_data = {
         "items": [{"title": f"Rifa celular - Boletos: {titulos_boletos}", "quantity": len(numeros_boletos), "unit_price": float(monto_unitario), "currency_id": MP_CURRENCY_ID}],
-        "payer": {"name": nombre_limpio, "surname": apellidos_limpios, "email": correo_limpio, "phone": {"area_code": "52", "number": telefono_limpio}},
+        "payer": {"name": nombre.strip(), "surname": apellidos.strip() or "Sin Apellido", "email": correo, "phone": {"area_code": "52", "number": telefono}},
         "external_reference": external_reference,
         "payment_methods": {"excluded_payment_methods": [], "excluded_payment_types": [], "installments": 1},
-        "statement_descriptor": "RIFA CELULAR",
-        "expires": True,
-        "date_of_expiration": fecha_expiracion_iso
+        "statement_descriptor": "RIFA CELULAR"
     }
     if url_retorno:
         preference_data["back_urls"] = {"success": url_retorno, "pending": url_retorno, "failure": url_retorno}
@@ -249,10 +225,10 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
         nuevas_ventas = []
         for _, r in df_r[filtro_reserva].iterrows():
             nuevas_ventas.append({
-                "ID_Boleto": f"BOL-{random.randint(10000, 99999)}", "Nombre": str(r["Nombre"]).strip(), "Correo": str(r["Correo"]).strip().lower(),
+                "ID_Boleto": f"BOL-{random.randint(10000, 99999)}", "Nombre": r["Nombre"], "Correo": r["Correo"],
                 "Evento": "Rifa de Celular", "Numero_Boleto": r["Numero_Boleto"], "Precio": r["Monto"],
                 "Metodo_Pago": payment_info.get("payment_type_id", "mercadopago"), "Codigo_Pago": pago_id,
-                "Fecha_Compra": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Numero_Telefonico": normalizar_telefono(r["Numero_Telefonico"]),
+                "Fecha_Compra": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Numero_Telefonico": r["Numero_Telefonico"],
                 "Estado_Pago": "APROBADO", "Referencia_Pago": ext_ref, "MercadoPago_Payment_ID": pago_id, "MercadoPago_Preference_ID": r["MercadoPago_Preference_ID"]
             })
         conn.update(worksheet="Ventas", data=pd.concat([df_v, pd.DataFrame(nuevas_ventas)], ignore_index=True))
@@ -376,11 +352,8 @@ def main():
                 with st.spinner("Verificando..."):
                     try:
                         df_r = conn.read(worksheet="Reservas", ttl=0)
-                        # Limpieza estricta de entradas y normalización en pandas para coincidencias a prueba de fallos
                         correo_limpio = buscar_correo.strip().lower()
-                        num_limpio = buscar_num.strip().zfill(3)
-                        
-                        filtro = (df_r["Numero_Boleto"].astype(str).str.strip().str.zfill(3) == num_limpio) & (df_r["Correo"].astype(str).str.strip().str.lower() == correo_limpio)
+                        filtro = (df_r["Numero_Boleto"].astype(str).str.zfill(3) == str(buscar_num).strip().zfill(3)) & (df_r["Correo"].str.lower() == correo_limpio)
                         reservas = df_r[filtro]
                         
                         if reservas.empty: st.error("No encontramos una reserva con esos datos.")
@@ -452,7 +425,7 @@ def main():
                         with col_dom: dominio = st.selectbox("Extensión:", ["@gmail.com", "@hotmail.com", "@outlook.com", "@yahoo.com", "Otro..."])
 
                         correo = st.text_input("Correo completo:", placeholder="usuario@empresa.com") if dominio == "Otro..." else f"{correo_usuario.replace('@', '').strip()}{dominio}" if correo_usuario else ""
-                        telefono = st.text_input("WhatsApp (10 dígitos):", max_chars=14)
+                        telefono = st.text_input("WhatsApp (10 dígitos):", max_chars=10)
                         
                         st.write(f"**Total a Pagar:** ${precio_base * len(boletos):.2f} MXN")
 
@@ -462,26 +435,20 @@ def main():
                             ahora = datetime.now()
                             siguen_validos = all(t in pre_reservas and pre_reservas[t]['session_id'] == st.session_state.session_id and pre_reservas[t]['expires_at'] > ahora for t in boletos)
 
-                            # Limpieza estricta de inputs de formulario
-                            nombre_limpio = nombre.strip() if nombre else ""
-                            apellidos_limpios = apellidos.strip() if apellidos else ""
-                            correo_limpio = correo.strip().lower() if correo else ""
-                            telefono_limpio = normalizar_telefono(telefono)
-
-                            correo_valido = re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}$", correo_limpio)
+                            correo_valido = re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}$", correo.strip().lower())
                             
                             if not siguen_validos:
                                 st.error("⚠️ El tiempo de carrito (15 min) expiró. Por favor, selecciona los boletos de nuevo.")
                                 st.session_state.selected_tickets = []
-                            elif not nombre_limpio or not apellidos_limpios or not correo_usuario or not telefono_limpio: st.error("⚠️ Completa todos los campos.")
+                            elif not nombre or not apellidos or not correo_usuario or not telefono: st.error("⚠️ Completa todos los campos.")
                             elif not correo_valido: st.error("⚠️ El formato del correo NO es válido.")
-                            elif len(telefono_limpio) != 10: st.error("⚠️ El número debe contener exactamente 10 dígitos numéricos (sin espacios ni símbolos).")
+                            elif not (telefono.isdigit() and len(telefono) == 10): st.error("⚠️ El número debe contener 10 dígitos numéricos.")
                             else:
                                 ref = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
                                 ordenes = [{
                                     "External_Reference": ref, "MercadoPago_Preference_ID": "", "MercadoPago_Payment_ID": "",
-                                    "Numero_Boleto": str(t), "Nombre": f"{nombre_limpio} {apellidos_limpios}", "Correo": correo_limpio,
-                                    "Numero_Telefonico": telefono_limpio, "Monto": float(precio_base), "Estado_Reserva": "PENDIENTE",
+                                    "Numero_Boleto": str(t), "Nombre": f"{nombre.strip()} {apellidos.strip()}", "Correo": correo.strip().lower(),
+                                    "Numero_Telefonico": telefono, "Monto": float(precio_base), "Estado_Reserva": "PENDIENTE",
                                     "Fecha_Creacion": ahora.strftime("%Y-%m-%d %H:%M:%S"),
                                     "Expira_En": (ahora + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
                                     "Fecha_Actualizacion": ahora.strftime("%Y-%m-%d %H:%M:%S")
@@ -494,7 +461,7 @@ def main():
                                         for t in boletos:
                                             if t in pre_reservas: del pre_reservas[t]
                                         try:
-                                            _, url_pago = crear_preferencia_mercado_pago(nombre_limpio, apellidos_limpios, correo_limpio, telefono_limpio, boletos, precio_base, ref, None)
+                                            _, url_pago = crear_preferencia_mercado_pago(nombre, apellidos, correo.strip().lower(), telefono, boletos, precio_base, ref, None)
                                             if url_pago:
                                                 st.session_state.pago_generado_url = url_pago
                                                 st.rerun()
