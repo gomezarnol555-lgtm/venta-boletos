@@ -1,5 +1,6 @@
 import os
 import random
+import re  # NUEVO: Importado para validación de formato de correos
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
@@ -119,12 +120,12 @@ def generar_pdf_boleto(datos_boleto: Dict[str, Any]) -> str:
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
 
-def crear_preferencia_mercado_pago(nombre, correo, telefono, numero_boleto, monto, external_reference, custom_return_scheme: Optional[str] = None):
+# MODIFICADO: Recibe nombre y apellidos explícitamente separados
+def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numero_boleto, monto, external_reference, custom_return_scheme: Optional[str] = None):
     url_retorno = custom_return_scheme if custom_return_scheme else MP_RETURN_URL
     
-    partes_nombre = nombre.strip().split(" ", 1)
-    payer_name = partes_nombre[0]
-    payer_surname = partes_nombre[1] if len(partes_nombre) > 1 else "Sin Apellido"
+    payer_name = nombre.strip()
+    payer_surname = apellidos.strip() if apellidos.strip() else "Sin Apellido"
     
     preference_data = {
         "items": [{
@@ -463,15 +464,33 @@ def main():
                             st.session_state.pago_generado_url = None
                             st.rerun()
                     else:
-                        nombre = st.text_input("Nombre completo:")
+                        # MODIFICADO: Separación de Nombres y Apellidos en dos campos visuales
+                        col_nom, col_ape = st.columns(2)
+                        with col_nom:
+                            nombre = st.text_input("Nombre(s):")
+                        with col_ape:
+                            apellidos = st.text_input("Apellidos:")
+                            
+                        # MODIFICADO: Restricciones en los campos de entrada
                         correo = st.text_input("Correo electrónico:")
-                        telefono = st.text_input("Número de WhatsApp / Celular:")
+                        telefono = st.text_input("Número de WhatsApp / Celular (10 dígitos):", max_chars=10)
+                        
                         st.write(f"**Total a Pagar:** ${precio_base:.2f} MXN")
 
                         if st.button("Reservar Boleto", type="primary", use_container_width=True):
-                            if not nombre or not correo or not telefono:
-                                st.error("⚠️ Completa tus datos para proceder.")
+                            # MODIFICADO: Validaciones estrictas con REGEX para correo y longitud/tipo para el teléfono
+                            correo_valido = re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", correo)
+                            telefono_valido = telefono.isdigit() and len(telefono) == 10
+
+                            if not nombre or not apellidos or not correo or not telefono:
+                                st.error("⚠️ Completa todos los campos para proceder.")
+                            elif not correo_valido:
+                                st.error("⚠️ El formato del correo electrónico no es válido.")
+                            elif not telefono_valido:
+                                st.error("⚠️ El número telefónico debe contener exactamente 10 dígitos numéricos.")
                             else:
+                                # MODIFICADO: Unificamos el nombre completo para enviarlo a Google Sheets y al PDF
+                                nombre_completo = f"{nombre.strip()} {apellidos.strip()}"
                                 ref_externa = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{ticket}"
                                 fecha = datetime.now()
                                 reserva = {
@@ -479,7 +498,7 @@ def main():
                                     "MercadoPago_Preference_ID": "",
                                     "MercadoPago_Payment_ID": "",
                                     "Numero_Boleto": str(ticket),
-                                    "Nombre": nombre,
+                                    "Nombre": nombre_completo, # Se guarda unido en la base de datos para no afectar lógica posterior
                                     "Correo": correo,
                                     "Numero_Telefonico": telefono,
                                     "Monto": float(precio_base),
@@ -493,7 +512,8 @@ def main():
                                     exito, msj = registrar_reserva_cobro(conn, reserva)
                                     if exito:
                                         try:
-                                            pref_id, url_pago = crear_preferencia_mercado_pago(nombre, correo, telefono, ticket, precio_base, ref_externa, None)
+                                            # MODIFICADO: Se envían nombre y apellidos por separado a Mercado Pago
+                                            pref_id, url_pago = crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, ticket, precio_base, ref_externa, None)
                                             if url_pago:
                                                 st.session_state.pago_generado_url = url_pago
                                                 st.rerun()
