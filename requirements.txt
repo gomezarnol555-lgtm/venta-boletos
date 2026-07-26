@@ -4,3 +4,4 @@ requests
 reportlab
 st-gsheets-connection
 mercadopago
+qrcode pillow
