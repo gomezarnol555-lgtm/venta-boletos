@@ -17,7 +17,6 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
 from streamlit_gsheets import GSheetsConnection
 
-# SDK de Mercado Pago
 import mercadopago
 
 # -----------------------------
@@ -43,8 +42,8 @@ MP_RETURN_URL = obtener_config("MP_RETURN_URL")
 MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
 
 # Configuración CoDi BBVA (Datos del beneficiario)
-BBVA_CLABE = obtener_config("BBVA_CLABE", "012180000000000000") # Reemplazar con CLABE BBVA real
-BBVA_BENEFICIARIO = obtener_config("BBVA_BENEFICIARIO", "RIFAS Y EVENTOS SA DE CV")
+BBVA_CLABE = obtener_config("BBVA_CLABE", "012180015696423512") # Tu CLABE integrada
+BBVA_BENEFICIARIO = obtener_config("BBVA_BENEFICIARIO", "RIFAS Y EVENTOS") # Pon tu nombre real aquí
 
 if not MP_ACCESS_TOKEN:
     st.warning("⚠️ Modo Desarrollo: No se detectó 'MP_ACCESS_TOKEN'. Mercado Pago fallará si se invoca.")
@@ -104,10 +103,6 @@ CSS_CUSTOM = """
 # Funciones Bancarias BBVA CoDi
 # -----------------------------
 def generar_qr_codi_bbva(monto: float, referencia: str, concepto: str) -> str:
-    """
-    Genera la carga útil de pago estándar CoDi/SPEI y retorna el QR en formato Base64.
-    Compatible con la app BBVA México y cualquier app bancaria con lector CoDi/QR SPEI.
-    """
     payload_codi = {
         "clabe": BBVA_CLABE,
         "nombre": BBVA_BENEFICIARIO,
@@ -132,10 +127,8 @@ def generar_qr_codi_bbva(monto: float, referencia: str, concepto: str) -> str:
     return f"data:image/png;base64,{img_str}"
 
 def verificar_pago_codi_servidor(referencia: str) -> bool:
-    """
-    Simulación de consulta de liquidación interbancaria SPEI / CoDi vía API BBVA Net Cash.
-    En un entorno productivo real, esta función consulta el endpoint de Banxico o el Webhook recibido de BBVA.
-    """
+    # ⚠️ ADVERTENCIA: Esta función devuelve True automáticamente (MVP).
+    # Para producción, se debe conectar a una API bancaria o verificar manualmente.
     return True
 
 # -----------------------------
@@ -301,8 +294,6 @@ def renderizar_mapa_interactivo():
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
 
-    # BLINDAJE: Si NO se ha generado un cobro aún, limpiamos boletos expirados.
-    # Si YA estamos en la pantalla de pago (CoDi o Mercado Pago), mantenemos firme la selección actual.
     if not (st.session_state.get("pago_generado_url") or st.session_state.get("qr_codi_base64")):
         st.session_state.selected_tickets = [t for t in st.session_state.selected_tickets if t in pre_reservas and pre_reservas[t]['session_id'] == mi_sesion]
 
@@ -482,7 +473,6 @@ def main():
                     total_pagar = precio_base * len(boletos)
                     st.success(f"🎫 **En tu carrito:** {', '.join(boletos)} (Tienes 15 min para pagar)")
                     
-                    # SECCIÓN DE PAGO GENERADA (MERCADO PAGO vs CODI BBVA)
                     if st.session_state.pago_generado_url or st.session_state.qr_codi_base64:
                         st.write(f"### Total a pagar: ${total_pagar:.2f} MXN")
                         
@@ -560,34 +550,36 @@ def main():
                                 ref = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
                                 st.session_state.external_ref_activa = ref
                                 
+                                # 1. Registramos la reserva en estado PENDIENTE en Google Sheets
                                 ordenes = [{
                                     "External_Reference": ref, "MercadoPago_Preference_ID": "", "MercadoPago_Payment_ID": "",
                                     "Numero_Boleto": str(t), "Nombre": f"{nombre.strip()} {apellidos.strip()}", "Correo": correo.strip().lower(),
                                     "Numero_Telefonico": telefono, "Monto": float(precio_base), "Estado_Reserva": "PENDIENTE",
-                                    "Fecha_Creacion": ahora.strftime("%Y-%m-%d %H:%M:%S"),
-                                    "Expira_En": (ahora + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
-                                    "Fecha_Actualizacion": ahora.strftime("%Y-%m-%d %H:%M:%S")
+                                    "Fecha_Creacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "Expira_En": (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
+                                    "Fecha_Actualizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 } for t in boletos]
-
-                                with st.spinner("Registrando reserva y generando canales de cobro..."):
-                                    exito, msj = registrar_reserva_cobro(conn, ordenes)
-                                    if exito:
-                                        # NOTA ARQUITECTÓNICA: Ya no borramos 'pre_reservas[t]' aquí para evitar
-                                        # que el renderizador del mapa vacíe el carrito al ejecutar st.rerun().
-                                        try:
-                                            # 1. Generamos CoDi BBVA
-                                            st.session_state.qr_codi_base64 = generar_qr_codi_bbva(total_pagar, ref, ", ".join(boletos))
-                                            
-                                            # 2. Generamos Mercado Pago
-                                            if sdk:
-                                                _, url_pago = crear_preferencia_mercado_pago(nombre, apellidos, correo.strip().lower(), telefono, boletos, precio_base, ref, None)
-                                                st.session_state.pago_generado_url = url_pago
-                                            else:
-                                                st.session_state.pago_generado_url = "https://mercadopago.com.mx"
-                                                
-                                            st.rerun()
-                                        except Exception as e: st.error(f"⚠️ Error generando canales de pago: {e}")
-                                    else: st.error(f"⚠️ Error al conectar con Google Sheets: {msj}")
+                                
+                                exito, msg = registrar_reserva_cobro(conn, ordenes)
+                                
+                                if exito:
+                                    # 2. Generamos link de Mercado Pago
+                                    pref_id, init_point = crear_preferencia_mercado_pago(
+                                        nombre, apellidos, correo, telefono, boletos, precio_base, ref
+                                    )
+                                    st.session_state.pago_generado_url = init_point
+                                    
+                                    # 3. ENLAZAMOS EL QR AL MONTO TOTAL Y A TU CLABE
+                                    st.session_state.qr_codi_base64 = generar_qr_codi_bbva(
+                                        monto=total_pagar, 
+                                        referencia=ref, 
+                                        concepto="Rifa Celular"
+                                    )
+                                    
+                                    # Refrescamos la pantalla para mostrar los botones de pago
+                                    st.rerun()
+                                else:
+                                    st.error(f"Error al registrar la reserva en la base de datos: {msg}")
 
 if __name__ == "__main__":
     main()
