@@ -108,7 +108,6 @@ def generar_qr_codi_bbva(monto: float, referencia: str, concepto: str) -> str:
     Genera la carga útil de pago estándar CoDi/SPEI y retorna el QR en formato Base64.
     Compatible con la app BBVA México y cualquier app bancaria con lector CoDi/QR SPEI.
     """
-    # Estructura de cadena de pago Banxico / SPEI QR
     payload_codi = {
         "clabe": BBVA_CLABE,
         "nombre": BBVA_BENEFICIARIO,
@@ -119,17 +118,14 @@ def generar_qr_codi_bbva(monto: float, referencia: str, concepto: str) -> str:
         "tipo": "CODI_SPEI"
     }
     
-    # Formateamos el string para el lector de la app bancaria
     cadena_qr = f"SPEI|clabe:{payload_codi['clabe']}|nombre:{payload_codi['nombre']}|monto:{payload_codi['monto']}|ref:{payload_codi['ref']}|concepto:{payload_codi['concepto']}"
     
-    # Generar código QR en memoria
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=2)
     qr.add_data(cadena_qr)
     qr.make(fit=True)
     
     img = qr.make_image(fill_color="#004481", back_color="white")
     
-    # Convertir a base64 para Streamlit
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -140,9 +136,6 @@ def verificar_pago_codi_servidor(referencia: str) -> bool:
     Simulación de consulta de liquidación interbancaria SPEI / CoDi vía API BBVA Net Cash.
     En un entorno productivo real, esta función consulta el endpoint de Banxico o el Webhook recibido de BBVA.
     """
-    # EXPERTO BBVA: Aquí va tu llamada HTTP a la API de BBVA de consulta de movimientos por Referencia Numérica.
-    # Por ahora, simulamos que el pago se aprueba para fines de demostración funcional si la referencia existe.
-    # Si quieres probar el flujo de rechazo, puedes poner return False temporalmente.
     return True
 
 # -----------------------------
@@ -205,11 +198,13 @@ def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_
         "statement_descriptor": "RIFA CELULAR"
     }
     if url_retorno:
+        if not url_retorno.startswith("http://") and not url_retorno.startswith("https://"):
+            url_retorno = f"https://{url_retorno}"
         preference_data["back_urls"] = {"success": url_retorno, "pending": url_retorno, "failure": url_retorno}
         preference_data["auto_return"] = "approved"
         
     preference = sdk.preference().create(preference_data).get("response", {})
-    if "id" not in preference: raise Exception(f"Rechazado por MP: {preference.get('message', 'Error')}")
+    if "id" not in preference: raise Exception(f"Rechazado por MP: {preference.get('message', 'Error en credenciales o URL de retorno')}")
     return preference.get("id", ""), preference.get("init_point") or preference.get("sandbox_init_point", "")
 
 # -----------------------------
@@ -306,7 +301,10 @@ def renderizar_mapa_interactivo():
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
 
-    st.session_state.selected_tickets = [t for t in st.session_state.selected_tickets if t in pre_reservas and pre_reservas[t]['session_id'] == mi_sesion]
+    # BLINDAJE: Si NO se ha generado un cobro aún, limpiamos boletos expirados.
+    # Si YA estamos en la pantalla de pago (CoDi o Mercado Pago), mantenemos firme la selección actual.
+    if not (st.session_state.get("pago_generado_url") or st.session_state.get("qr_codi_base64")):
+        st.session_state.selected_tickets = [t for t in st.session_state.selected_tickets if t in pre_reservas and pre_reservas[t]['session_id'] == mi_sesion]
 
     conn = st.connection("gsheets", type=GSheetsConnection)
     try:
@@ -359,7 +357,7 @@ def renderizar_mapa_interactivo():
                 elif estado == "pre_reservado_otros":
                     st.button(f"🔒\n{num}", disabled=True, key=f"btn_{num}", help="Alguien más tiene este boleto en su carrito ahora mismo.")
                 else:
-                    is_selected = (estado == "pre_reservado_mio")
+                    is_selected = (estado == "pre_reservado_mio") or (num in st.session_state.selected_tickets)
                     etiqueta = f"✅\n{num}" if is_selected else f"🟢\n{num}"
                     
                     if st.button(etiqueta, key=f"btn_{num}", type="primary" if is_selected else "secondary"):
@@ -425,10 +423,8 @@ def main():
                             reserva = reservas.iloc[-1]
                             ext_ref = reserva["External_Reference"]
                             
-                            # 1. Buscamos primero en Mercado Pago
                             pago_confirmado = buscar_pago_en_mercadopago(ext_ref)
                             
-                            # 2. Si no se pagó en MP, consultamos el motor SPEI/CoDi BBVA
                             if not pago_confirmado and verificar_pago_codi_servidor(ext_ref):
                                 pago_confirmado = {
                                     "id": f"CODI-{int(datetime.now().timestamp())}",
@@ -504,7 +500,6 @@ def main():
                             </div>
                             """, unsafe_allow_html=True)
                             
-                            # Botón de consulta rápida en vivo para CoDi
                             if st.button("🔄 Ya transferí, verificar liquidación BBVA", type="primary"):
                                 with st.spinner("Conectando con Banxico / BBVA..."):
                                     if verificar_pago_codi_servidor(st.session_state.external_ref_activa):
@@ -577,8 +572,8 @@ def main():
                                 with st.spinner("Registrando reserva y generando canales de cobro..."):
                                     exito, msj = registrar_reserva_cobro(conn, ordenes)
                                     if exito:
-                                        for t in boletos:
-                                            if t in pre_reservas: del pre_reservas[t]
+                                        # NOTA ARQUITECTÓNICA: Ya no borramos 'pre_reservas[t]' aquí para evitar
+                                        # que el renderizador del mapa vacíe el carrito al ejecutar st.rerun().
                                         try:
                                             # 1. Generamos CoDi BBVA
                                             st.session_state.qr_codi_base64 = generar_qr_codi_bbva(total_pagar, ref, ", ".join(boletos))
@@ -588,7 +583,7 @@ def main():
                                                 _, url_pago = crear_preferencia_mercado_pago(nombre, apellidos, correo.strip().lower(), telefono, boletos, precio_base, ref, None)
                                                 st.session_state.pago_generado_url = url_pago
                                             else:
-                                                st.session_state.pago_generado_url = "https://mercadopago.com.mx" # Fallback si no hay API Key
+                                                st.session_state.pago_generado_url = "https://mercadopago.com.mx"
                                                 
                                             st.rerun()
                                         except Exception as e: st.error(f"⚠️ Error generando canales de pago: {e}")
