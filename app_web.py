@@ -1,10 +1,4 @@
-import os
-import random
-import re
-import uuid
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
+parse import urlencode, urlparse, parse_qsl, urlunparse
 
 import pandas as pd
 import streamlit as st
@@ -98,6 +92,27 @@ def qp_get(qp: Any, nombre: str, default: str = "") -> str:
     except Exception:
         return default
 
+
+
+def safe_get(obj: Any, key: str, default=None):
+    try:
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        if hasattr(obj, "get"):
+            try:
+                return obj.get(key, default)
+            except Exception:
+                pass
+        if hasattr(obj, key):
+            return getattr(obj, key)
+        try:
+            return obj[key]
+        except Exception:
+            return default
+    except Exception:
+        return default
 
 def parse_ticket_number(valor: Any) -> str:
     if pd.isna(valor) or str(valor).strip() == "":
@@ -429,15 +444,13 @@ def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_refe
         return None
 
     try:
-        # 1. Intenta confirmar por Checkout Session asociada al PaymentIntent.
-        # Si la sesion no confirma por metadata/correo, NO se detiene: continua con PaymentIntent directo.
         try:
             sesiones = stripe.checkout.Session.list(
                 payment_intent=payment_intent_id,
                 limit=1,
                 expand=["data.payment_intent"]
             )
-            data = sesiones.get("data", [])
+            data = safe_get(sesiones, "data", [])
             if data:
                 pago_desde_sesion = construir_pago_stripe_desde_session(
                     session=data[0],
@@ -448,34 +461,30 @@ def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_refe
                 if pago_desde_sesion:
                     return pago_desde_sesion
         except Exception as e:
-            st.session_state.ultimo_error_pago = f"Stripe: no se pudo validar sesion por PaymentIntent, se intenta PI directo. Detalle: {e}"
+            st.session_state.ultimo_error_pago = f"Stripe: no se pudo validar sesion por PaymentIntent. Se intenta PI directo. Detalle: {e}"
 
-        # 2. Valida directamente PaymentIntent. Esta es la fuente bancaria para pi_...
         intent = stripe.PaymentIntent.retrieve(payment_intent_id, expand=["latest_charge"])
-        estado_intent = str(intent.get("status", "")).strip().lower()
+        estado_intent = str(safe_get(intent, "status", "")).strip().lower()
         if estado_intent != "succeeded":
             st.session_state.ultimo_error_pago = f"Stripe: PaymentIntent no aprobado. ID={payment_intent_id}, status={estado_intent}"
             return None
 
+        monto_recibido_centavos = int(safe_get(intent, "amount", 0) or 0)
         if monto_esperado is not None:
             monto_esperado_centavos = int(round(float(monto_esperado) * 100))
-            monto_recibido_centavos = int(intent.get("amount") or 0)
             if monto_recibido_centavos != monto_esperado_centavos:
                 st.session_state.ultimo_error_pago = f"Stripe: monto no coincide. Esperado={monto_esperado_centavos}, Stripe={monto_recibido_centavos}, ID={payment_intent_id}"
                 return None
 
-        metadata = dict(intent.get("metadata") or {})
+        metadata = dict(safe_get(intent, "metadata", {}) or {})
         ref_intent = str(metadata.get("external_reference") or "").strip()
-        latest_charge = intent.get("latest_charge") or {}
-        billing_details = latest_charge.get("billing_details") if isinstance(latest_charge, dict) else {}
-        correo_stripe = str((billing_details or {}).get("email") or intent.get("receipt_email") or "").strip().lower()
+        latest_charge = safe_get(intent, "latest_charge", {}) or {}
+        billing_details = safe_get(latest_charge, "billing_details", {}) or {}
+        correo_stripe = str(safe_get(billing_details, "email", "") or safe_get(intent, "receipt_email", "") or "").strip().lower()
 
-        # Si Stripe trae referencia y no coincide, no entregar PDF.
         if external_reference_esperada and ref_intent and ref_intent != external_reference_esperada:
             st.session_state.ultimo_error_pago = f"Stripe: referencia no coincide. Esperada={external_reference_esperada}, Stripe={ref_intent}, ID={payment_intent_id}"
             return None
-
-        # Si Stripe trae correo y no coincide, no entregar PDF.
         if correo_reserva and correo_stripe and correo_stripe != correo_reserva:
             st.session_state.ultimo_error_pago = f"Stripe: correo no coincide. Esperado={correo_reserva}, Stripe={correo_stripe}, ID={payment_intent_id}"
             return None
@@ -527,11 +536,14 @@ def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, corr
 
 def buscar_pago_stripe_payment_intent_por_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY:
+        st.session_state.ultimo_error_pago = "Stripe: STRIPE_SECRET_KEY no configurado."
         return None
+
     external_reference = str(external_reference or "").strip()
     correo = str(correo or "").strip().lower()
     rango_fecha = normalizar_fecha_unix(fecha_creacion_reserva)
     monto_centavos = int(round(float(monto_esperado) * 100)) if monto_esperado is not None else None
+
     try:
         starting_after = None
         for _ in range(20):
@@ -539,37 +551,39 @@ def buscar_pago_stripe_payment_intent_por_correo_fecha(external_reference: str, 
             if starting_after:
                 params["starting_after"] = starting_after
             intents = stripe.PaymentIntent.list(**params)
-            data = intents.get("data", [])
+            data = safe_get(intents, "data", [])
             for intent in data:
-                if intent.get("status") != "succeeded":
+                estado_intent = str(safe_get(intent, "status", "")).strip().lower()
+                if estado_intent != "succeeded":
                     continue
-                if monto_centavos is not None and int(intent.get("amount") or 0) != monto_centavos:
+                amount_intent = int(safe_get(intent, "amount", 0) or 0)
+                if monto_centavos is not None and amount_intent != monto_centavos:
                     continue
-                metadata = dict(intent.get("metadata") or {})
+                metadata = dict(safe_get(intent, "metadata", {}) or {})
                 ref_intent = str(metadata.get("external_reference") or "").strip()
-                latest_charge = intent.get("latest_charge") or {}
-                billing = latest_charge.get("billing_details") if isinstance(latest_charge, dict) else {}
-                correo_charge = str((billing or {}).get("email") or intent.get("receipt_email") or "").strip().lower()
+                latest_charge = safe_get(intent, "latest_charge", {}) or {}
+                billing = safe_get(latest_charge, "billing_details", {}) or {}
+                correo_charge = str(safe_get(billing, "email", "") or safe_get(intent, "receipt_email", "") or "").strip().lower()
                 ref_ok = bool(external_reference and ref_intent == external_reference)
                 correo_ok = bool(correo and correo_charge == correo)
                 if external_reference and not (ref_ok or correo_ok):
                     continue
                 return {
-                    "id": str(intent.get("id", "")),
+                    "id": str(safe_get(intent, "id", "")),
                     "external_reference": ref_intent or external_reference,
                     "payment_type_id": "stripe_card",
                     "status": "approved",
                     "provider": "STRIPE",
                     "provider_session_id": ""
                 }
-            if not intents.get("has_more") or not data:
+            if not safe_get(intents, "has_more", False) or not data:
                 break
-            starting_after = str(data[-1].get("id"))
+            starting_after = str(safe_get(data[-1], "id", ""))
+        st.session_state.ultimo_error_pago = f"Stripe: no se encontro PaymentIntent conciliable. Referencia={external_reference}, correo={correo}, monto_centavos={monto_centavos}"
         return None
     except Exception as e:
         st.session_state.ultimo_error_pago = f"Stripe PI conciliacion: {e}"
         return None
-
 
 def buscar_pago_mercadopago_por_referencia_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not sdk:
