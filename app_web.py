@@ -417,39 +417,72 @@ def obtener_pago_stripe(stripe_session_id: str, external_reference_esperada: Opt
 
 def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_reference_esperada: Optional[str] = None, monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY or not payment_intent_id:
+        st.session_state.ultimo_error_pago = "Stripe: falta STRIPE_SECRET_KEY o PaymentIntent."
         return None
-    payment_intent_id = str(payment_intent_id or "").strip()
-    if not payment_intent_id.startswith("pi_"):
-        return None
-    try:
-        sesiones = stripe.checkout.Session.list(payment_intent=payment_intent_id, limit=1, expand=["data.payment_intent"])
-        data = sesiones.get("data", [])
-        if data:
-            return construir_pago_stripe_desde_session(data[0], external_reference_esperada or "", correo_reserva, monto_esperado)
 
+    payment_intent_id = str(payment_intent_id or "").strip()
+    external_reference_esperada = str(external_reference_esperada or "").strip()
+    correo_reserva = str(correo_reserva or "").strip().lower()
+
+    if not payment_intent_id.startswith("pi_"):
+        st.session_state.ultimo_error_pago = f"Stripe: el ID no es PaymentIntent pi_: {payment_intent_id}"
+        return None
+
+    try:
+        # 1. Intenta confirmar por Checkout Session asociada al PaymentIntent.
+        # Si la sesion no confirma por metadata/correo, NO se detiene: continua con PaymentIntent directo.
+        try:
+            sesiones = stripe.checkout.Session.list(
+                payment_intent=payment_intent_id,
+                limit=1,
+                expand=["data.payment_intent"]
+            )
+            data = sesiones.get("data", [])
+            if data:
+                pago_desde_sesion = construir_pago_stripe_desde_session(
+                    session=data[0],
+                    external_reference_reserva=external_reference_esperada,
+                    correo_reserva=correo_reserva,
+                    monto_esperado=monto_esperado
+                )
+                if pago_desde_sesion:
+                    return pago_desde_sesion
+        except Exception as e:
+            st.session_state.ultimo_error_pago = f"Stripe: no se pudo validar sesion por PaymentIntent, se intenta PI directo. Detalle: {e}"
+
+        # 2. Valida directamente PaymentIntent. Esta es la fuente bancaria para pi_...
         intent = stripe.PaymentIntent.retrieve(payment_intent_id, expand=["latest_charge"])
-        if intent.get("status") != "succeeded":
+        estado_intent = str(intent.get("status", "")).strip().lower()
+        if estado_intent != "succeeded":
+            st.session_state.ultimo_error_pago = f"Stripe: PaymentIntent no aprobado. ID={payment_intent_id}, status={estado_intent}"
             return None
+
         if monto_esperado is not None:
             monto_esperado_centavos = int(round(float(monto_esperado) * 100))
             monto_recibido_centavos = int(intent.get("amount") or 0)
             if monto_recibido_centavos != monto_esperado_centavos:
+                st.session_state.ultimo_error_pago = f"Stripe: monto no coincide. Esperado={monto_esperado_centavos}, Stripe={monto_recibido_centavos}, ID={payment_intent_id}"
                 return None
+
         metadata = dict(intent.get("metadata") or {})
         ref_intent = str(metadata.get("external_reference") or "").strip()
         latest_charge = intent.get("latest_charge") or {}
         billing_details = latest_charge.get("billing_details") if isinstance(latest_charge, dict) else {}
         correo_stripe = str((billing_details or {}).get("email") or intent.get("receipt_email") or "").strip().lower()
-        correo_reserva = str(correo_reserva or "").strip().lower()
 
+        # Si Stripe trae referencia y no coincide, no entregar PDF.
         if external_reference_esperada and ref_intent and ref_intent != external_reference_esperada:
+            st.session_state.ultimo_error_pago = f"Stripe: referencia no coincide. Esperada={external_reference_esperada}, Stripe={ref_intent}, ID={payment_intent_id}"
             return None
+
+        # Si Stripe trae correo y no coincide, no entregar PDF.
         if correo_reserva and correo_stripe and correo_stripe != correo_reserva:
+            st.session_state.ultimo_error_pago = f"Stripe: correo no coincide. Esperado={correo_reserva}, Stripe={correo_stripe}, ID={payment_intent_id}"
             return None
 
         return {
-            "id": str(intent.get("id", payment_intent_id)),
-            "external_reference": ref_intent or external_reference_esperada or "",
+            "id": payment_intent_id,
+            "external_reference": ref_intent or external_reference_esperada,
             "payment_type_id": "stripe_card",
             "status": "approved",
             "provider": "STRIPE",
@@ -458,7 +491,6 @@ def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_refe
     except Exception as e:
         st.session_state.ultimo_error_pago = f"Stripe PaymentIntent retrieve: {e}"
         return None
-
 
 def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY:
