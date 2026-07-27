@@ -49,16 +49,26 @@ STRIPE_SECRET_KEY = obtener_config("STRIPE_SECRET_KEY")
 STRIPE_RETURN_URL = obtener_config("STRIPE_RETURN_URL")
 STRIPE_CURRENCY_ID = obtener_config("STRIPE_CURRENCY_ID", "mxn").lower()
 
-# Depuración segura. En producción puedes poner DEBUG_PAGOS = "false" en Secrets.
+# Diagnóstico seguro
 DEBUG_PAGOS = obtener_config("DEBUG_PAGOS", "true").lower() in ["1", "true", "si", "sí", "yes", "on"]
 
+sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if MP_ACCESS_TOKEN else None
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 
+
+# -----------------------------
+# Utilidades generales
+# -----------------------------
 def enmascarar_clave(valor: str, visibles_inicio: int = 7, visibles_fin: int = 4) -> str:
     valor = str(valor or "").strip()
+
     if not valor:
         return "NO CONFIGURADO"
+
     if len(valor) <= visibles_inicio + visibles_fin:
         return "*" * len(valor)
+
     return f"{valor[:visibles_inicio]}...{valor[-visibles_fin:]}"
 
 
@@ -73,27 +83,12 @@ def diagnostico_configuracion_pagos() -> Dict[str, Any]:
         "STRIPE_SECRET_KEY_es_sk": str(STRIPE_SECRET_KEY).startswith("sk_"),
         "STRIPE_SECRET_KEY_es_pk_error": str(STRIPE_SECRET_KEY).startswith("pk_"),
         "STRIPE_RETURN_URL": STRIPE_RETURN_URL or "NO CONFIGURADO",
-        "STRIPE_RETURN_URL_es_http": str(STRIPE_RETURN_URL).startswith(("http://", "https://")),
+        "STRIPE_RETURN_URL_es_http": normalizar_url(STRIPE_RETURN_URL).startswith(("http://", "https://")),
         "STRIPE_CURRENCY_ID": STRIPE_CURRENCY_ID,
         "DEBUG_PAGOS": DEBUG_PAGOS
     }
 
 
-if not MP_ACCESS_TOKEN:
-    st.warning("⚠️ Modo Desarrollo: No se detectó 'MP_ACCESS_TOKEN'. Mercado Pago no estará disponible.")
-
-if not STRIPE_SECRET_KEY:
-    st.warning("⚠️ Modo Desarrollo: No se detectó 'STRIPE_SECRET_KEY'. Stripe no estará disponible.")
-
-sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if MP_ACCESS_TOKEN else None
-
-if STRIPE_SECRET_KEY:
-    stripe.api_key = STRIPE_SECRET_KEY
-
-
-# -----------------------------
-# Utilidades de URL
-# -----------------------------
 def normalizar_url(url: str) -> str:
     url = str(url or "").strip()
     if url and not url.startswith(("http://", "https://")):
@@ -102,13 +97,46 @@ def normalizar_url(url: str) -> str:
 
 
 def agregar_parametros_url(url: str, parametros: Dict[str, str]) -> str:
-    """Agrega parámetros sin romper los que ya existan en la URL."""
+    """Agrega parámetros sin romper los existentes. Mantiene intacto {CHECKOUT_SESSION_ID}."""
     url = normalizar_url(url)
     partes = urlparse(url)
     query_actual = dict(parse_qsl(partes.query, keep_blank_values=True))
     query_actual.update({k: str(v) for k, v in parametros.items() if v is not None})
     nueva_query = urlencode(query_actual)
+    nueva_query = nueva_query.replace("%7BCHECKOUT_SESSION_ID%7D", "{CHECKOUT_SESSION_ID}")
     return urlunparse((partes.scheme, partes.netloc, partes.path, partes.params, nueva_query, partes.fragment))
+
+
+def qp_get(qp: Any, nombre: str, default: str = "") -> str:
+    try:
+        valor = qp.get(nombre, default)
+        if isinstance(valor, list):
+            return str(valor[0]) if valor else default
+        return str(valor)
+    except Exception:
+        return default
+
+
+def mostrar_diagnostico_pagos():
+    if not DEBUG_PAGOS:
+        return
+
+    with st.expander("🔎 Ver diagnóstico técnico de pagos"):
+        st.write("**Configuración detectada:**")
+        st.json(diagnostico_configuracion_pagos())
+
+        if st.session_state.get("ultimo_error_pago"):
+            st.write("**Último error real:**")
+            st.code(st.session_state.ultimo_error_pago)
+
+        if st.session_state.get("errores_proveedores"):
+            st.write("**Errores registrados:**")
+            st.code("\n".join(st.session_state.errores_proveedores))
+
+        st.info(
+            "Si Stripe usa sk_test_, prueba con tarjetas de prueba. "
+            "Si Mercado Pago o Stripe regresan a la app sin PDF, revisa que RETURN_URL sea la URL pública de Streamlit y no GitHub."
+        )
 
 
 # -----------------------------
@@ -155,7 +183,7 @@ CSS_CUSTOM = """
 
 
 # -----------------------------
-# Funciones PDF, Mercado Pago y Stripe
+# PDF
 # -----------------------------
 def dibujar_fondo_autenticidad(canvas, doc):
     width, height = doc.pagesize
@@ -181,9 +209,9 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         story.append(Spacer(1, 16))
         precio_float = float(boleto.get("Precio", 0))
         data = [
-            [Paragraph("<b>ID de Boleto:</b>", estilo_normal), Paragraph(str(boleto["ID_Boleto"]), estilo_normal)],
-            [Paragraph("<b>Nombre:</b>", estilo_normal), Paragraph(str(boleto["Nombre"]), estilo_normal)],
-            [Paragraph("<b>N° de Boleto:</b>", estilo_normal), Paragraph(str(boleto["Numero_Boleto"]), estilo_normal)],
+            [Paragraph("<b>ID de Boleto:</b>", estilo_normal), Paragraph(str(boleto.get("ID_Boleto", "")), estilo_normal)],
+            [Paragraph("<b>Nombre:</b>", estilo_normal), Paragraph(str(boleto.get("Nombre", "")), estilo_normal)],
+            [Paragraph("<b>N° de Boleto:</b>", estilo_normal), Paragraph(str(boleto.get("Numero_Boleto", "")), estilo_normal)],
             [Paragraph("<b>Precio Pagado:</b>", estilo_normal), Paragraph(f"${precio_float:.2f} {MP_CURRENCY_ID}", estilo_normal)],
             [Paragraph("<b>Método de Pago:</b>", estilo_normal), Paragraph(str(boleto.get("Metodo_Pago", "Pago electrónico")).upper(), estilo_normal)],
             [Paragraph("<b>Ref / ID Pago:</b>", estilo_normal), Paragraph(str(boleto.get("Codigo_Pago", "N/A")), estilo_normal)],
@@ -204,6 +232,22 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     return nombre_archivo
 
 
+def procesar_descarga_pdf(datos_boletos: List[dict]):
+    if not datos_boletos:
+        st.warning("No hay boletos disponibles para generar PDF.")
+        return
+
+    archivo_pdf = generar_pdf_boleto(datos_boletos)
+    with open(archivo_pdf, "rb") as pdf_file:
+        pdf_bytes = pdf_file.read()
+
+    label = "⬇️ Descargar mis Boletos Oficiales (PDF)" if len(datos_boletos) > 1 else "⬇️ Descargar mi Boleto Oficial (PDF)"
+    st.download_button(label=label, data=pdf_bytes, file_name=archivo_pdf, mime="application/pdf", type="primary", use_container_width=True)
+
+
+# -----------------------------
+# Proveedores de pago
+# -----------------------------
 def crear_preferencia_mercado_pago(
     nombre,
     apellidos,
@@ -273,12 +317,6 @@ def crear_sesion_stripe(
         raise ValueError("STRIPE_SECRET_KEY no parece ser una llave secreta válida. Debe iniciar con sk_test_ o sk_live_.")
     if not STRIPE_RETURN_URL:
         raise ValueError("STRIPE_RETURN_URL no está configurado. Debe ser la URL pública de tu app Streamlit, no el enlace de GitHub.")
-    if not normalizar_url(STRIPE_RETURN_URL).startswith(("http://", "https://")):
-        raise ValueError("STRIPE_RETURN_URL debe iniciar con http:// o https://.")
-    if not numeros_boletos:
-        raise ValueError("No hay boletos seleccionados para crear la sesión de Stripe.")
-    if float(monto_unitario) <= 0:
-        raise ValueError("El monto unitario debe ser mayor a cero.")
 
     url_base = normalizar_url(STRIPE_RETURN_URL)
     success_url = agregar_parametros_url(url_base, {"stripe_session_id": "{CHECKOUT_SESSION_ID}", "external_reference": external_reference})
@@ -340,8 +378,10 @@ def obtener_pago_stripe(
 
         if external_reference_esperada and external_reference != external_reference_esperada:
             return None
+
         if str(session.get("currency", "")).lower() != STRIPE_CURRENCY_ID:
             return None
+
         if monto_esperado is not None:
             monto_recibido_centavos = int(session.get("amount_total") or 0)
             monto_esperado_centavos = int(round(float(monto_esperado) * 100))
@@ -364,15 +404,13 @@ def obtener_pago_stripe(
             "provider_session_id": str(session.get("id", ""))
         }
 
-    except Exception:
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"Stripe retrieve: {e}"
         return None
 
 
-# -----------------------------
-# Funciones Hojas de Cálculo
-# -----------------------------
 def buscar_pago_en_mercadopago(external_reference: str) -> Optional[Dict]:
-    if not sdk:
+    if not sdk or not external_reference:
         return None
     try:
         pagos = sdk.payment().search({"external_reference": external_reference}).get("response", {}).get("results", [])
@@ -380,10 +418,36 @@ def buscar_pago_en_mercadopago(external_reference: str) -> Optional[Dict]:
         if pago:
             pago["provider"] = "MERCADO_PAGO"
         return pago
-    except Exception:
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"MP search: {e}"
         return None
 
 
+def obtener_pago_mercadopago_por_id(payment_id: str, external_reference_fallback: str = "") -> Optional[Dict[str, Any]]:
+    if not sdk:
+        return None
+
+    try:
+        if payment_id:
+            pago = sdk.payment().get(payment_id).get("response", {})
+            if pago and pago.get("status") == "approved":
+                pago["provider"] = "MERCADO_PAGO"
+                if not pago.get("external_reference") and external_reference_fallback:
+                    pago["external_reference"] = external_reference_fallback
+                return pago
+
+        if external_reference_fallback:
+            return buscar_pago_en_mercadopago(external_reference_fallback)
+
+        return None
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"MP get: {e}"
+        return None
+
+
+# -----------------------------
+# Google Sheets
+# -----------------------------
 def columnas_ventas() -> list:
     return [
         "ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago",
@@ -416,6 +480,20 @@ def parse_ticket_number(val: Any) -> str:
         return str(val).strip().zfill(3)
 
 
+def leer_reservas(conn: GSheetsConnection) -> pd.DataFrame:
+    try:
+        return asegurar_columnas(conn.read(worksheet="Reservas", ttl=0).dropna(how="all"), columnas_reservas())
+    except Exception:
+        return pd.DataFrame(columns=columnas_reservas())
+
+
+def leer_ventas(conn: GSheetsConnection) -> pd.DataFrame:
+    try:
+        return asegurar_columnas(conn.read(worksheet="Ventas", ttl=0).dropna(how="all"), columnas_ventas())
+    except Exception:
+        return pd.DataFrame(columns=columnas_ventas())
+
+
 def obtener_estado_boletos_bd(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -> dict:
     estados = {}
 
@@ -443,11 +521,7 @@ def obtener_estado_boletos_bd(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame
 
 def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]:
     try:
-        try:
-            df_r = conn.read(worksheet="Reservas", ttl=0)
-        except Exception:
-            df_r = pd.DataFrame(columns=columnas_reservas())
-
+        df_r = leer_reservas(conn)
         df_actualizado = pd.concat([
             asegurar_columnas(df_r.dropna(how="all"), columnas_reservas()),
             asegurar_columnas(pd.DataFrame(ordenes), columnas_reservas())
@@ -465,8 +539,7 @@ def actualizar_ids_proveedores_reserva(
     stripe_session_id: str = ""
 ) -> Tuple[bool, str]:
     try:
-        df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
-        df_r = asegurar_columnas(df_r, columnas_reservas())
+        df_r = leer_reservas(conn)
         filtro = df_r["External_Reference"].astype(str) == str(external_reference)
         if not filtro.any():
             return False, "No se encontró la reserva para actualizar."
@@ -486,22 +559,14 @@ def liberar_reserva_por_rechazo_o_cancelacion(
     external_reference: str,
     motivo: str = "CANCELADO_PAGO"
 ) -> Tuple[bool, str]:
-    """
-    Libera boletos reservados en Google Sheets cuando el pago se cancela,
-    se rechaza o falla en Stripe o Mercado Pago.
-
-    No elimina registros históricos: cambia Estado_Reserva de PENDIENTE al motivo indicado.
-    Al dejar de estar PENDIENTE, el mapa vuelve a mostrar los boletos como disponibles.
-    """
     try:
         if not external_reference:
             return False, "No se recibió External_Reference para liberar la reserva."
 
-        df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
-        df_r = asegurar_columnas(df_r, columnas_reservas())
+        df_r = leer_reservas(conn)
         filtro = (
             (df_r["External_Reference"].astype(str) == str(external_reference))
-            & (df_r["Estado_Reserva"].astype(str).str.upper() == "PENDIENTE")
+            & (df_r["Estado_Reserva"].astype(str).str.upper().isin(["PENDIENTE", "ERROR_CONFIRMACION_STRIPE"]))
         )
         if not filtro.any():
             return True, "No había reservas pendientes por liberar."
@@ -515,7 +580,6 @@ def liberar_reserva_por_rechazo_o_cancelacion(
 
 
 def limpiar_carrito_local():
-    """Libera el carrito temporal en memoria para la sesión actual."""
     pre_reservas = obtener_pre_reservas_globales()
     for t in list(st.session_state.get("selected_tickets", [])):
         if t in pre_reservas and pre_reservas[t]["session_id"] == st.session_state.session_id:
@@ -526,8 +590,6 @@ def limpiar_carrito_local():
     st.session_state.stripe_pago_url = None
     st.session_state.stripe_session_id = None
     st.session_state.payment_provider = None
-    st.session_state.errores_proveedores = []
-    st.session_state.ultimo_error_stripe = ""
     st.session_state.external_ref_activa = None
 
 
@@ -538,15 +600,11 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
     proveedor = str(payment_info.get("provider", "MERCADO_PAGO")).strip().upper()
     provider_session_id = str(payment_info.get("provider_session_id", "")).strip()
 
-    try:
-        df_r = asegurar_columnas(conn.read(worksheet="Reservas", ttl=0).dropna(how="all"), columnas_reservas())
-    except Exception:
-        df_r = pd.DataFrame(columns=columnas_reservas())
+    if not ext_ref:
+        return []
 
-    try:
-        df_v = asegurar_columnas(conn.read(worksheet="Ventas", ttl=0).dropna(how="all"), columnas_ventas())
-    except Exception:
-        df_v = pd.DataFrame(columns=columnas_ventas())
+    df_r = leer_reservas(conn)
+    df_v = leer_ventas(conn)
 
     if proveedor == "STRIPE":
         filtro_existente = df_v["Stripe_Payment_ID"].astype(str) == pago_id
@@ -579,7 +637,7 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
             "Nombre": r["Nombre"],
             "Correo": r["Correo"],
             "Evento": "Rifa de Celular",
-            "Numero_Boleto": r["Numero_Boleto"],
+            "Numero_Boleto": parse_ticket_number(r["Numero_Boleto"]),
             "Precio": r["Monto"],
             "Metodo_Pago": metodo_pago,
             "Codigo_Pago": pago_id,
@@ -599,8 +657,61 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
     return nuevas_ventas
 
 
+def buscar_ventas_por_correo_boleto(conn: GSheetsConnection, numero_boleto: str, correo: str) -> List[Dict[str, Any]]:
+    df_v = leer_ventas(conn)
+    if df_v.empty:
+        return []
+
+    filtro = (
+        (df_v["Numero_Boleto"].astype(str).apply(parse_ticket_number) == parse_ticket_number(numero_boleto))
+        & (df_v["Correo"].astype(str).str.lower() == correo.strip().lower())
+        & (df_v["Estado_Pago"].astype(str).str.upper().isin(["APROBADO", "VENDIDO"]))
+    )
+
+    if not filtro.any():
+        return []
+
+    ref = str(df_v[filtro].iloc[-1].get("Referencia_Pago", ""))
+    if ref:
+        return df_v[df_v["Referencia_Pago"].astype(str) == ref].to_dict(orient="records")
+
+    return df_v[filtro].to_dict(orient="records")
+
+
+def verificar_y_recuperar_boletos_desde_reserva(conn: GSheetsConnection, numero_boleto: str, correo: str) -> List[Dict[str, Any]]:
+    df_r = leer_reservas(conn)
+    if df_r.empty:
+        return []
+
+    filtro = (
+        (df_r["Numero_Boleto"].astype(str).apply(parse_ticket_number) == parse_ticket_number(numero_boleto))
+        & (df_r["Correo"].astype(str).str.lower() == correo.strip().lower())
+    )
+    reservas = df_r[filtro]
+    if reservas.empty:
+        return []
+
+    reserva = reservas.iloc[-1]
+    ext_ref = str(reserva.get("External_Reference", ""))
+    if not ext_ref:
+        return []
+
+    # Primero verifica Mercado Pago, luego Stripe.
+    pago_confirmado = buscar_pago_en_mercadopago(ext_ref)
+    if not pago_confirmado:
+        stripe_session_id = str(reserva.get("Stripe_Session_ID", "")).strip()
+        total_reserva = float(df_r[df_r["External_Reference"].astype(str) == ext_ref]["Monto"].astype(float).sum())
+        if stripe_session_id:
+            pago_confirmado = obtener_pago_stripe(stripe_session_id, external_reference_esperada=ext_ref, monto_esperado=total_reserva)
+
+    if pago_confirmado:
+        return actualizar_pago_en_hojas(conn, pago_confirmado)
+
+    return []
+
+
 # -----------------------------
-# Componentes UI Interactivos
+# Componentes UI
 # -----------------------------
 @st.fragment(run_every=5)
 def renderizar_mapa_interactivo():
@@ -683,130 +794,105 @@ def renderizar_mapa_interactivo():
                         st.rerun()
 
 
-def procesar_descarga_pdf(datos_boletos: List[dict]):
-    archivo_pdf = generar_pdf_boleto(datos_boletos)
-    with open(archivo_pdf, "rb") as pdf_file:
-        pdf_bytes = pdf_file.read()
-    label = "⬇️ Descargar mis Boletos Oficiales (PDF)" if len(datos_boletos) > 1 else "⬇️ Descargar mi Boleto Oficial (PDF)"
-    st.download_button(label=label, data=pdf_bytes, file_name=archivo_pdf, mime="application/pdf", type="primary", use_container_width=True)
+def procesar_retorno_pago(conn: GSheetsConnection):
+    qp = st.query_params
+
+    # Mercado Pago cancelado/rechazado
+    mp_status = qp_get(qp, "status", "") or qp_get(qp, "collection_status", "")
+    mp_return = qp_get(qp, "mp_return", "")
+    mp_status = mp_status.lower()
+    mp_return = mp_return.lower()
+
+    if mp_return == "failure" or mp_status in ["rejected", "cancelled", "canceled", "failure", "failed"]:
+        ext_ref = qp_get(qp, "external_reference", "") or st.session_state.get("external_ref_activa", "")
+        liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, motivo="CANCELADO_MERCADO_PAGO")
+        limpiar_carrito_local()
+        st.query_params.clear()
+        st.warning("El pago con Mercado Pago fue cancelado o rechazado. La reserva fue liberada y los boletos ya pueden seleccionarse nuevamente.")
+        st.rerun()
+
+    if mp_return == "pending" or mp_status == "pending":
+        st.warning("El pago con Mercado Pago quedó pendiente. Tus boletos permanecerán reservados hasta que se confirme el pago o expire la reserva.")
+        st.query_params.clear()
+
+    # Mercado Pago aprobado. Algunos retornos usan payment_id y otros collection_id.
+    payment_id = qp_get(qp, "payment_id", "") or qp_get(qp, "collection_id", "")
+    ext_ref_mp = qp_get(qp, "external_reference", "") or st.session_state.get("external_ref_activa", "")
+    if payment_id and mp_status == "approved":
+        pago_mp = obtener_pago_mercadopago_por_id(payment_id, ext_ref_mp)
+        if pago_mp:
+            datos = actualizar_pago_en_hojas(conn, pago_mp)
+            st.session_state.boletos_confirmados = datos
+            st.session_state.payment_success_id = str(pago_mp.get("id", payment_id))
+            st.session_state.payment_provider = "MERCADO_PAGO"
+            limpiar_carrito_local()
+            st.session_state.boletos_confirmados = datos
+            st.query_params.clear()
+            st.rerun()
+        else:
+            st.error("Mercado Pago regresó aprobado, pero no se pudo confirmar el pago por API. Intenta en 'Buscar mis Boletos / Verificar Pago'.")
+            mostrar_diagnostico_pagos()
+
+    # Stripe cancelado/rechazado
+    if "stripe_cancelled" in qp:
+        ext_ref = qp_get(qp, "external_reference", "") or st.session_state.get("external_ref_activa", "")
+        liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, motivo="CANCELADO_STRIPE")
+        limpiar_carrito_local()
+        st.query_params.clear()
+        st.warning("El pago con Stripe fue cancelado o rechazado. La reserva fue liberada y los boletos ya pueden seleccionarse nuevamente.")
+        st.rerun()
+
+    # Stripe aprobado
+    stripe_session_id = qp_get(qp, "stripe_session_id", "")
+    if stripe_session_id:
+        ext_ref = qp_get(qp, "external_reference", "") or st.session_state.get("external_ref_activa", "")
+        pago_stripe = obtener_pago_stripe(stripe_session_id, external_reference_esperada=ext_ref if ext_ref else None)
+        if pago_stripe:
+            datos = actualizar_pago_en_hojas(conn, pago_stripe)
+            st.session_state.boletos_confirmados = datos
+            st.session_state.payment_success_id = str(pago_stripe.get("id", stripe_session_id))
+            st.session_state.payment_provider = "STRIPE"
+            limpiar_carrito_local()
+            st.session_state.boletos_confirmados = datos
+            st.query_params.clear()
+            st.rerun()
+        else:
+            # No libera si no se confirmó como pagado, salvo que Stripe regrese por cancel_url.
+            st.error("Stripe regresó a la app, pero el pago aún no aparece como pagado. Intenta en 'Buscar mis Boletos / Verificar Pago'.")
+            mostrar_diagnostico_pagos()
 
 
-def mostrar_diagnostico_pagos():
-    if not DEBUG_PAGOS:
-        return
-    with st.expander("🔎 Ver diagnóstico técnico de pagos"):
-        st.write("**Diagnóstico de configuración:**")
-        st.json(diagnostico_configuracion_pagos())
-        if st.session_state.get("ultimo_error_stripe"):
-            st.write("**Último error real de Stripe:**")
-            st.code(st.session_state.ultimo_error_stripe)
-        if st.session_state.get("errores_proveedores"):
-            st.write("**Errores registrados al generar enlaces:**")
-            st.code("\n".join(st.session_state.errores_proveedores))
-        st.info(
-            "Si STRIPE_SECRET_KEY aparece como NO CONFIGURADO, revisa App settings > Secrets en Streamlit Cloud. "
-            "Si STRIPE_SECRET_KEY_es_pk_error = true, estás usando la llave pública pk_ y debes cambiarla por sk_test_ o sk_live_. "
-            "Si STRIPE_RETURN_URL_es_http = false, la URL debe iniciar con https://."
-        )
+def inicializar_estado():
+    defaults = {
+        "session_id": str(uuid.uuid4()),
+        "selected_tickets": [],
+        "payment_success_id": None,
+        "pago_generado_url": None,
+        "stripe_pago_url": None,
+        "stripe_session_id": None,
+        "payment_provider": None,
+        "errores_proveedores": [],
+        "ultimo_error_pago": "",
+        "external_ref_activa": None,
+        "boletos_confirmados": []
+    }
+
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
 def main():
     st.set_page_config(page_title="Rifa de Celular", page_icon="🎟️", layout="wide")
     st.markdown(CSS_CUSTOM, unsafe_allow_html=True)
-
-    if "session_id" not in st.session_state:
-        st.session_state.session_id = str(uuid.uuid4())
-    if "selected_tickets" not in st.session_state:
-        st.session_state.selected_tickets = []
-    if "payment_success_id" not in st.session_state:
-        st.session_state.payment_success_id = None
-    if "pago_generado_url" not in st.session_state:
-        st.session_state.pago_generado_url = None
-    if "stripe_pago_url" not in st.session_state:
-        st.session_state.stripe_pago_url = None
-    if "stripe_session_id" not in st.session_state:
-        st.session_state.stripe_session_id = None
-    if "payment_provider" not in st.session_state:
-        st.session_state.payment_provider = None
-    if "errores_proveedores" not in st.session_state:
-        st.session_state.errores_proveedores = []
-    if "ultimo_error_stripe" not in st.session_state:
-        st.session_state.ultimo_error_stripe = ""
-    if "external_ref_activa" not in st.session_state:
-        st.session_state.external_ref_activa = None
+    inicializar_estado()
 
     conn = st.connection("gsheets", type=GSheetsConnection)
-    qp = st.query_params
-
-    # Retorno Mercado Pago aprobado
-    if "payment_id" in qp and "status" in qp and str(qp.get("status", "")).lower() == "approved":
-        st.session_state.payment_success_id = str(qp["payment_id"])
-        st.session_state.payment_provider = "MERCADO_PAGO"
-        st.session_state.pago_generado_url = None
-        st.session_state.stripe_pago_url = None
-        st.query_params.clear()
-        st.rerun()
-
-    # Retorno Mercado Pago rechazado/cancelado/fallido: liberar boletos en BD y memoria
-    mp_status = str(qp.get("status", "") or qp.get("collection_status", "")).lower()
-    mp_return = str(qp.get("mp_return", "")).lower()
-    if mp_return == "failure" or mp_status in ["rejected", "cancelled", "canceled", "failure", "failed"]:
-        ext_ref_cancelada = str(qp.get("external_reference", "") or st.session_state.get("external_ref_activa", ""))
-        liberado, mensaje_liberacion = liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref_cancelada, motivo="CANCELADO_MERCADO_PAGO")
-        limpiar_carrito_local()
-        if liberado:
-            st.warning("El pago con Mercado Pago fue cancelado o rechazado. La reserva fue liberada y los boletos ya pueden seleccionarse nuevamente.")
-        else:
-            st.error(f"Mercado Pago fue cancelado/rechazado, pero no se pudo liberar la reserva: {mensaje_liberacion}")
-        st.query_params.clear()
-        st.rerun()
-
-    # Retorno Mercado Pago pendiente: no liberar, mantiene reserva formal
-    if mp_return == "pending" or mp_status == "pending":
-        st.warning("El pago con Mercado Pago quedó pendiente. Tus boletos permanecerán reservados hasta que se confirme el pago o expire la reserva.")
-        st.query_params.clear()
-
-    # Retorno Stripe aprobado
-    if "stripe_session_id" in qp:
-        stripe_session_id = str(qp["stripe_session_id"])
-        ext_ref = str(qp.get("external_reference", "") or st.session_state.get("external_ref_activa", ""))
-        pago_stripe = obtener_pago_stripe(stripe_session_id=stripe_session_id, external_reference_esperada=ext_ref if ext_ref else None)
-        if pago_stripe:
-            st.session_state.payment_success_id = pago_stripe["id"]
-            st.session_state.external_ref_activa = pago_stripe["external_reference"]
-            st.session_state.stripe_session_id = stripe_session_id
-            st.session_state.payment_provider = "STRIPE"
-            st.session_state.pago_generado_url = None
-            st.session_state.stripe_pago_url = None
-            st.query_params.clear()
-            st.rerun()
-        else:
-            liberado, mensaje_liberacion = liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, motivo="ERROR_CONFIRMACION_STRIPE")
-            limpiar_carrito_local()
-            if liberado:
-                st.error("No fue posible confirmar el pago con Stripe. La reserva fue liberada para que puedas seleccionar nuevamente los boletos.")
-            else:
-                st.error(f"No fue posible confirmar Stripe y tampoco liberar la reserva: {mensaje_liberacion}")
-            mostrar_diagnostico_pagos()
-            st.query_params.clear()
-            st.rerun()
-
-    # Retorno Stripe cancelado/rechazado: liberar boletos en BD y memoria
-    if "stripe_cancelled" in qp:
-        ext_ref_cancelada = str(qp.get("external_reference", "") or st.session_state.get("external_ref_activa", ""))
-        liberado, mensaje_liberacion = liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref_cancelada, motivo="CANCELADO_STRIPE")
-        limpiar_carrito_local()
-        if liberado:
-            st.warning("El pago con Stripe fue cancelado o rechazado. La reserva fue liberada y los boletos ya pueden seleccionarse nuevamente.")
-        else:
-            st.error(f"El pago fue cancelado, pero no se pudo liberar la reserva: {mensaje_liberacion}")
-        st.query_params.clear()
-        st.rerun()
+    procesar_retorno_pago(conn)
 
     st.title("📱 Plataforma de Boletos - Gran Rifa")
     tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🔍 Buscar mis Boletos / Verificar Pago"])
 
-    # --- TAB 2: VERIFICACIÓN MANUAL / POST-PAGO ---
     with tab2:
         st.markdown("### ¿Pagaste con Mercado Pago o Stripe y cerraste la ventana?")
         col_b1, col_b2 = st.columns(2)
@@ -819,75 +905,28 @@ def main():
             if not buscar_num or not buscar_correo:
                 st.warning("Por favor, llena ambos campos.")
             else:
-                with st.spinner("Consultando Mercado Pago y Stripe..."):
-                    try:
-                        df_r = asegurar_columnas(conn.read(worksheet="Reservas", ttl=0).dropna(how="all"), columnas_reservas())
-                        correo_limpio = buscar_correo.strip().lower()
-                        filtro = (
-                            (df_r["Numero_Boleto"].astype(str).str.zfill(3) == str(buscar_num).strip().zfill(3))
-                            & (df_r["Correo"].astype(str).str.lower() == correo_limpio)
-                        )
-                        reservas = df_r[filtro]
-                        if reservas.empty:
-                            st.error("No encontramos una reserva con esos datos.")
-                        else:
-                            reserva = reservas.iloc[-1]
-                            ext_ref = str(reserva["External_Reference"])
-                            total_reserva = float(df_r[df_r["External_Reference"].astype(str) == ext_ref]["Monto"].astype(float).sum())
-                            pago_confirmado = buscar_pago_en_mercadopago(ext_ref)
+                with st.spinner("Buscando boletos y confirmando pago..."):
+                    datos = buscar_ventas_por_correo_boleto(conn, buscar_num, buscar_correo)
+                    if not datos:
+                        datos = verificar_y_recuperar_boletos_desde_reserva(conn, buscar_num, buscar_correo)
 
-                            if not pago_confirmado:
-                                stripe_session_id = str(reserva.get("Stripe_Session_ID", "")).strip()
-                                if stripe_session_id:
-                                    pago_confirmado = obtener_pago_stripe(stripe_session_id, external_reference_esperada=ext_ref, monto_esperado=total_reserva)
-
-                            if pago_confirmado:
-                                st.success("✅ Pago verificado directamente con el proveedor.")
-                                st.balloons()
-                                datos = actualizar_pago_en_hojas(conn, pago_confirmado)
-                                if datos:
-                                    procesar_descarga_pdf(datos)
-                                else:
-                                    st.info("El pago ya había sido registrado o no se encontró la reserva asociada.")
-                            else:
-                                st.warning("⏳ La reserva existe, pero aún no se encontró un pago aprobado.")
-                                mostrar_diagnostico_pagos()
-                    except Exception as e:
-                        st.error(f"Error de conexión: {e}")
-
-    # --- TAB 1: FLUJO DE COMPRA ---
-    with tab1:
-        if st.session_state.payment_success_id:
-            st.balloons()
-            st.success(f"🎉 ¡Compra Confirmada! (ID: {st.session_state.payment_success_id})")
-            with st.spinner("Generando PDF..."):
-                try:
-                    if st.session_state.payment_provider == "STRIPE":
-                        pinfo = obtener_pago_stripe(
-                            stripe_session_id=st.session_state.stripe_session_id,
-                            external_reference_esperada=st.session_state.external_ref_activa
-                        )
-                        if not pinfo:
-                            raise Exception("Stripe no confirmó el pago como liquidado.")
-                    else:
-                        if not sdk:
-                            raise Exception("Mercado Pago no está configurado.")
-                        pinfo = sdk.payment().get(st.session_state.payment_success_id).get("response", {})
-                        pinfo["provider"] = "MERCADO_PAGO"
-
-                    datos = actualizar_pago_en_hojas(conn, pinfo)
                     if datos:
+                        st.success("✅ Boletos encontrados. Puedes descargar tu PDF.")
                         procesar_descarga_pdf(datos)
                     else:
-                        st.error("Problema sincronizando compra.")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                    mostrar_diagnostico_pagos()
+                        st.error("No encontramos boletos pagados con esos datos. Si acabas de pagar, espera unos segundos y vuelve a intentar.")
+                        mostrar_diagnostico_pagos()
 
+    with tab1:
+        if st.session_state.get("boletos_confirmados"):
+            st.balloons()
+            st.success(f"🎉 ¡Compra Confirmada! (ID: {st.session_state.get('payment_success_id', 'N/A')})")
+            procesar_descarga_pdf(st.session_state.boletos_confirmados)
             st.write("---")
             if st.button("⬅️ Realizar otra compra", use_container_width=True):
-                limpiar_carrito_local()
+                st.session_state.boletos_confirmados = []
                 st.session_state.payment_success_id = None
+                limpiar_carrito_local()
                 st.rerun()
             st.stop()
 
@@ -985,7 +1024,7 @@ def main():
                                 ref = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
                                 st.session_state.external_ref_activa = ref
                                 st.session_state.errores_proveedores = []
-                                st.session_state.ultimo_error_stripe = ""
+                                st.session_state.ultimo_error_pago = ""
 
                                 ordenes = [{
                                     "External_Reference": ref,
@@ -1027,7 +1066,7 @@ def main():
                                             external_reference=ref
                                         )
                                     except Exception as e:
-                                        st.session_state.ultimo_error_stripe = str(e)
+                                        st.session_state.ultimo_error_pago = str(e)
                                         errores_proveedores.append(f"Stripe: {e}")
 
                                     st.session_state.errores_proveedores = errores_proveedores
