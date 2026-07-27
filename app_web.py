@@ -246,10 +246,30 @@ def columnas_reservas() -> list:
 
 
 def asegurar_columnas(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    df = df.copy()
     for col in cols:
         if col not in df.columns:
             df[col] = ""
-    return df[cols]
+    df = df[cols].astype("object")
+    df = df.where(pd.notna(df), "")
+    return df
+
+
+def limpiar_valor_id(valor: Any) -> str:
+    valor = str(valor or "").strip()
+    if valor.lower() in ["nan", "none", "null", "nat"]:
+        return ""
+    return valor
+
+
+def preparar_dataframe_para_update(df: pd.DataFrame, columnas: list) -> pd.DataFrame:
+    df = asegurar_columnas(df, columnas)
+    df = df.astype("object")
+    df = df.where(pd.notna(df), "")
+    for col in df.columns:
+        if col not in ["Monto", "Precio"]:
+            df[col] = df[col].apply(lambda x: "" if str(x).lower() in ["nan", "none", "null", "nat"] else x)
+    return df
 
 
 def leer_reservas(conn: GSheetsConnection) -> pd.DataFrame:
@@ -281,7 +301,7 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
 
 def actualizar_ids_proveedores_reserva(conn: GSheetsConnection, external_reference: str, mercado_pago_preference_id: str = "", stripe_session_id: str = "") -> Tuple[bool, str]:
     try:
-        df_r = leer_reservas(conn)
+        df_r = preparar_dataframe_para_update(leer_reservas(conn), columnas_reservas())
         filtro = df_r["External_Reference"].astype(str) == str(external_reference)
         if not filtro.any():
             return False, "No se encontro la reserva."
@@ -300,7 +320,7 @@ def marcar_reserva_estado(conn: GSheetsConnection, external_reference: str, esta
     try:
         if not external_reference:
             return False, "Sin referencia."
-        df_r = leer_reservas(conn)
+        df_r = preparar_dataframe_para_update(leer_reservas(conn), columnas_reservas())
         filtro = df_r["External_Reference"].astype(str) == str(external_reference)
         if not filtro.any():
             return False, "No se encontro la reserva."
@@ -316,7 +336,7 @@ def liberar_reserva_por_rechazo_o_cancelacion(conn: GSheetsConnection, external_
     try:
         if not external_reference:
             return False, "Sin referencia."
-        df_r = leer_reservas(conn)
+        df_r = preparar_dataframe_para_update(leer_reservas(conn), columnas_reservas())
         filtro = df_r["External_Reference"].astype(str) == str(external_reference)
         if not filtro.any():
             return True, "Sin reservas."
@@ -329,16 +349,18 @@ def liberar_reserva_por_rechazo_o_cancelacion(conn: GSheetsConnection, external_
 
 
 def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, Any]) -> List[Dict[str, Any]]:
-    ext_ref = str(payment_info.get("external_reference", "")).strip()
-    pago_id = str(payment_info.get("id", "")).strip()
-    proveedor = str(payment_info.get("provider", "MERCADO_PAGO")).strip().upper()
-    metodo_pago = str(payment_info.get("payment_type_id", proveedor.lower())).strip()
-    provider_session_id = str(payment_info.get("provider_session_id", "")).strip()
+    ext_ref = limpiar_valor_id(payment_info.get("external_reference", ""))
+    pago_id = limpiar_valor_id(payment_info.get("id", ""))
+    proveedor = limpiar_valor_id(payment_info.get("provider", "MERCADO_PAGO")).upper()
+    metodo_pago = limpiar_valor_id(payment_info.get("payment_type_id", proveedor.lower()))
+    provider_session_id = limpiar_valor_id(payment_info.get("provider_session_id", ""))
+
     if not ext_ref:
         return []
 
-    df_r = leer_reservas(conn)
-    df_v = leer_ventas(conn)
+    df_r = preparar_dataframe_para_update(leer_reservas(conn), columnas_reservas())
+    df_v = preparar_dataframe_para_update(leer_ventas(conn), columnas_ventas())
+
     ventas_ref = df_v[df_v["Referencia_Pago"].astype(str) == ext_ref]
     if not ventas_ref.empty:
         return ventas_ref.to_dict(orient="records")
@@ -349,27 +371,32 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
 
     df_r.loc[filtro_reserva, "Estado_Reserva"] = "PAGADO"
     df_r.loc[filtro_reserva, "Fecha_Actualizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     if proveedor == "STRIPE":
-        df_r.loc[filtro_reserva, "Stripe_Payment_ID"] = pago_id
+        if pago_id:
+            df_r.loc[filtro_reserva, "Stripe_Payment_ID"] = pago_id
         if provider_session_id:
             df_r.loc[filtro_reserva, "Stripe_Session_ID"] = provider_session_id
     else:
-        df_r.loc[filtro_reserva, "MercadoPago_Payment_ID"] = pago_id
+        if pago_id:
+            df_r.loc[filtro_reserva, "MercadoPago_Payment_ID"] = pago_id
+
+    df_r = preparar_dataframe_para_update(df_r, columnas_reservas())
     conn.update(worksheet="Reservas", data=df_r)
 
     nuevas_ventas = []
     for _, r in df_r[filtro_reserva].iterrows():
         nuevas_ventas.append({
             "ID_Boleto": f"BOL-{random.randint(10000, 99999)}",
-            "Nombre": r["Nombre"],
-            "Correo": r["Correo"],
+            "Nombre": r.get("Nombre", ""),
+            "Correo": r.get("Correo", ""),
             "Evento": "Rifa de Celular",
-            "Numero_Boleto": parse_ticket_number(r["Numero_Boleto"]),
-            "Precio": r["Monto"],
+            "Numero_Boleto": parse_ticket_number(r.get("Numero_Boleto", "")),
+            "Precio": r.get("Monto", ""),
             "Metodo_Pago": metodo_pago,
             "Codigo_Pago": pago_id,
             "Fecha_Compra": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Numero_Telefonico": r["Numero_Telefonico"],
+            "Numero_Telefonico": r.get("Numero_Telefonico", ""),
             "Estado_Pago": "VENDIDO",
             "Referencia_Pago": ext_ref,
             "MercadoPago_Payment_ID": pago_id if proveedor != "STRIPE" else "",
@@ -379,10 +406,11 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
             "Proveedor_Pago": proveedor
         })
 
-    df_final = pd.concat([df_v, asegurar_columnas(pd.DataFrame(nuevas_ventas), columnas_ventas())], ignore_index=True)
+    nuevas_ventas_df = preparar_dataframe_para_update(pd.DataFrame(nuevas_ventas), columnas_ventas())
+    df_final = pd.concat([df_v, nuevas_ventas_df], ignore_index=True)
+    df_final = preparar_dataframe_para_update(df_final, columnas_ventas())
     conn.update(worksheet="Ventas", data=df_final)
     return nuevas_ventas
-
 
 def dibujar_fondo_autenticidad(canvas, doc):
     width, height = doc.pagesize
