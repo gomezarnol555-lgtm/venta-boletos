@@ -488,6 +488,143 @@ def buscar_pago_stripe_por_referencia_o_correo(
         st.session_state.ultimo_error_pago = f"Stripe list fallback: {e}"
         return None
 
+
+
+def obtener_pago_mercadopago_manual(
+    identificador: str,
+    external_reference_fallback: str = ""
+) -> Optional[Dict[str, Any]]:
+    """
+    Recupera un pago de Mercado Pago usando:
+    - Payment ID numérico / collection_id.
+    - External Reference como respaldo.
+
+    Nota: si el usuario ingresa el Preference ID, se usa para localizar la reserva
+    en Google Sheets y después se confirma por external_reference.
+    """
+    if not sdk:
+        return None
+
+    identificador = str(identificador or "").strip()
+
+    try:
+        # Payment ID / collection_id normalmente es numérico.
+        if identificador and identificador.isdigit():
+            pago = sdk.payment().get(identificador).get("response", {})
+            if pago and pago.get("status") == "approved":
+                pago["provider"] = "MERCADO_PAGO"
+                if not pago.get("external_reference") and external_reference_fallback:
+                    pago["external_reference"] = external_reference_fallback
+                return pago
+
+        # Respaldo por external_reference.
+        if external_reference_fallback:
+            return buscar_pago_en_mercadopago(external_reference_fallback)
+
+        return None
+
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"MP manual recovery: {e}"
+        return None
+
+
+def obtener_pago_stripe_por_session_o_intent(
+    identificador: str,
+    external_reference_esperada: Optional[str] = None,
+    monto_esperado: Optional[float] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Recupera un pago de Stripe usando cualquiera de estos IDs:
+    - cs_...  Checkout Session ID
+    - pi_...  Payment Intent ID
+
+    Esta función ayuda cuando el retorno automático no registró la venta,
+    pero el cliente sí pagó y se tiene el ID visible en Stripe Dashboard.
+    """
+    identificador = str(identificador or "").strip()
+    if not identificador or not STRIPE_SECRET_KEY:
+        return None
+
+    try:
+        if identificador.startswith("cs_"):
+            return obtener_pago_stripe(
+                identificador,
+                external_reference_esperada=external_reference_esperada,
+                monto_esperado=monto_esperado
+            )
+
+        if identificador.startswith("pi_"):
+            sesiones = stripe.checkout.Session.list(
+                payment_intent=identificador,
+                limit=1,
+                expand=["data.payment_intent"]
+            )
+
+            data = sesiones.get("data", [])
+            if not data:
+                return None
+
+            session = data[0]
+            if session.get("payment_status") != "paid":
+                return None
+
+            metadata = dict(session.get("metadata") or {})
+            external_reference = metadata.get("external_reference") or session.get("client_reference_id") or external_reference_esperada or ""
+
+            if external_reference_esperada and external_reference != external_reference_esperada:
+                return None
+
+            if monto_esperado is not None:
+                monto_recibido_centavos = int(session.get("amount_total") or 0)
+                monto_esperado_centavos = int(round(float(monto_esperado) * 100))
+                if monto_recibido_centavos != monto_esperado_centavos:
+                    return None
+
+            return {
+                "id": identificador,
+                "external_reference": external_reference,
+                "payment_type_id": "stripe_card",
+                "status": "approved",
+                "provider": "STRIPE",
+                "provider_session_id": str(session.get("id", ""))
+            }
+
+        return None
+
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"Stripe manual recovery: {e}"
+        return None
+
+
+def diagnosticar_reservas_usuario(conn: GSheetsConnection, numero_boleto: str = "", correo: str = "", external_reference: str = "") -> Dict[str, Any]:
+    """Devuelve un diagnóstico seguro de reservas para saber por qué no se encuentra una compra."""
+    df_r = leer_reservas(conn)
+    if df_r.empty:
+        return {"reservas_total": 0, "mensaje": "La hoja Reservas está vacía o no se pudo leer."}
+
+    resultado = {"reservas_total": int(len(df_r))}
+
+    if correo:
+        df_correo = df_r[df_r["Correo"].astype(str).str.lower() == correo.strip().lower()]
+        resultado["reservas_con_correo"] = int(len(df_correo))
+        resultado["referencias_correo"] = df_correo["External_Reference"].astype(str).dropna().unique().tolist()[:10]
+
+    if numero_boleto:
+        num = parse_ticket_number(numero_boleto)
+        df_boleto = df_r[df_r["Numero_Boleto"].astype(str).apply(parse_ticket_number) == num]
+        resultado["reservas_con_boleto"] = int(len(df_boleto))
+        resultado["correos_boleto"] = df_boleto["Correo"].astype(str).dropna().unique().tolist()[:10]
+
+    if external_reference:
+        df_ref = df_r[df_r["External_Reference"].astype(str) == str(external_reference).strip()]
+        resultado["reservas_con_referencia"] = int(len(df_ref))
+        resultado["boletos_referencia"] = [parse_ticket_number(x) for x in df_ref["Numero_Boleto"].tolist()]
+        resultado["estado_referencia"] = df_ref["Estado_Reserva"].astype(str).dropna().unique().tolist()
+        resultado["stripe_session_guardada"] = df_ref["Stripe_Session_ID"].astype(str).dropna().unique().tolist()
+        resultado["mp_preference_guardada"] = df_ref["MercadoPago_Preference_ID"].astype(str).dropna().unique().tolist()
+
+    return resultado
+
 def buscar_pago_en_mercadopago(external_reference: str) -> Optional[Dict]:
     if not sdk or not external_reference:
         return None
@@ -757,58 +894,120 @@ def buscar_ventas_por_correo_boleto(conn: GSheetsConnection, numero_boleto: str,
     return df_v[filtro].to_dict(orient="records")
 
 
-def verificar_y_recuperar_boletos_desde_reserva(conn: GSheetsConnection, numero_boleto: str, correo: str) -> List[Dict[str, Any]]:
+def verificar_y_recuperar_boletos_desde_reserva(
+    conn: GSheetsConnection,
+    numero_boleto: str = "",
+    correo: str = "",
+    external_reference_manual: str = "",
+    stripe_id_manual: str = "",
+    mercado_pago_id_manual: str = ""
+) -> List[Dict[str, Any]]:
     """
     Recupera compras pagadas aunque la venta no se haya registrado automáticamente.
 
-    Funciona para compras de uno o varios boletos:
-    - Si consultas cualquiera de los boletos de la compra, obtiene el External_Reference.
-    - Verifica Mercado Pago por external_reference.
-    - Verifica Stripe por Stripe_Session_ID.
-    - Si no hay Stripe_Session_ID o falló el retorno, busca sesiones recientes pagadas en Stripe por external_reference/correo.
-    - Si el pago está aprobado, registra todos los boletos de esa compra en Ventas y genera el PDF.
+    Funciona para compras de 1, 2 o más boletos porque siempre trabaja por
+    External_Reference, es decir, por la compra completa.
+
+    Soporta recuperación por:
+    - número de boleto + correo,
+    - External_Reference,
+    - Stripe Checkout Session ID cs_...,
+    - Stripe Payment Intent ID pi_...,
+    - Mercado Pago Payment ID / collection_id,
+    - Mercado Pago Preference ID guardado en Reservas.
     """
     df_r = leer_reservas(conn)
     if df_r.empty:
         return []
 
     correo_limpio = correo.strip().lower()
-    numero_normalizado = parse_ticket_number(numero_boleto)
+    numero_normalizado = parse_ticket_number(numero_boleto) if numero_boleto else ""
+    ext_ref = str(external_reference_manual or "").strip()
+    mp_id = str(mercado_pago_id_manual or "").strip()
 
-    filtro_exact = (
-        (df_r["Numero_Boleto"].astype(str).apply(parse_ticket_number) == numero_normalizado)
-        & (df_r["Correo"].astype(str).str.lower() == correo_limpio)
-    )
+    reservas = pd.DataFrame(columns=columnas_reservas())
+    pago_confirmado = None
 
-    reservas = df_r[filtro_exact]
+    # 1. Referencia manual: ruta más confiable.
+    if ext_ref:
+        reservas = df_r[df_r["External_Reference"].astype(str) == ext_ref]
 
-    # Si por alguna razón el número no coincide por formato, intenta solo por correo y busca una compra que contenga el boleto.
-    if reservas.empty:
+    # 2. Mercado Pago manual.
+    #    Si es Payment ID, intenta obtener el pago y de ahí el external_reference.
+    if reservas.empty and mp_id:
+        pago_mp_manual = obtener_pago_mercadopago_manual(mp_id)
+        if pago_mp_manual:
+            pago_confirmado = pago_mp_manual
+            ext_ref = str(pago_mp_manual.get("external_reference", "")).strip()
+            if ext_ref:
+                reservas = df_r[df_r["External_Reference"].astype(str) == ext_ref]
+
+    # 3. Si el mp_id no fue Payment ID, puede ser Preference ID guardado en Reservas.
+    if reservas.empty and mp_id:
+        reservas = df_r[df_r["MercadoPago_Preference_ID"].astype(str) == mp_id]
+        if not reservas.empty:
+            ext_ref = str(reservas.iloc[-1].get("External_Reference", "")).strip()
+
+    # 4. Boleto + correo.
+    if reservas.empty and numero_normalizado and correo_limpio:
+        filtro_exact = (
+            (df_r["Numero_Boleto"].astype(str).apply(parse_ticket_number) == numero_normalizado)
+            & (df_r["Correo"].astype(str).str.lower() == correo_limpio)
+        )
+        reservas = df_r[filtro_exact]
+
+    # 5. Correo solamente y compra agrupada que contenga el boleto.
+    if reservas.empty and correo_limpio:
         candidatas = df_r[df_r["Correo"].astype(str).str.lower() == correo_limpio]
         refs_candidatas = candidatas["External_Reference"].astype(str).dropna().unique().tolist()
         for ref in refs_candidatas:
             grupo = candidatas[candidatas["External_Reference"].astype(str) == str(ref)]
             boletos_grupo = [parse_ticket_number(x) for x in grupo["Numero_Boleto"].tolist()]
-            if numero_normalizado in boletos_grupo:
+            if not numero_normalizado or numero_normalizado in boletos_grupo:
                 reservas = grupo
                 break
+
+    # 6. Stripe manual sin reserva inicial: busca el pago y obtiene external_reference.
+    if reservas.empty and stripe_id_manual:
+        pago_stripe_manual = obtener_pago_stripe_por_session_o_intent(stripe_id_manual)
+        if pago_stripe_manual and pago_stripe_manual.get("external_reference"):
+            pago_confirmado = pago_stripe_manual
+            ext_ref = str(pago_stripe_manual["external_reference"])
+            reservas = df_r[df_r["External_Reference"].astype(str) == ext_ref]
 
     if reservas.empty:
         return []
 
-    # Toma la última referencia encontrada para ese boleto/correo.
     reserva = reservas.iloc[-1]
-    ext_ref = str(reserva.get("External_Reference", "")).strip()
+    ext_ref = str(ext_ref or reserva.get("External_Reference", "")).strip()
     if not ext_ref:
         return []
 
     grupo_reserva = df_r[df_r["External_Reference"].astype(str) == ext_ref]
     total_reserva = float(grupo_reserva["Monto"].astype(float).sum()) if not grupo_reserva.empty else None
 
-    # 1) Mercado Pago por external_reference.
-    pago_confirmado = buscar_pago_en_mercadopago(ext_ref)
+    # Si ya existe venta, devuelve todos los boletos de la misma compra.
+    df_v = leer_ventas(conn)
+    ventas_ref = df_v[df_v["Referencia_Pago"].astype(str) == ext_ref]
+    if not ventas_ref.empty:
+        return ventas_ref.to_dict(orient="records")
 
-    # 2) Stripe por Session ID guardado en cualquiera de los boletos de la misma compra.
+    # 1) Mercado Pago por manual ID o external_reference.
+    if not pago_confirmado and mp_id:
+        pago_confirmado = obtener_pago_mercadopago_manual(mp_id, external_reference_fallback=ext_ref)
+
+    if not pago_confirmado:
+        pago_confirmado = buscar_pago_en_mercadopago(ext_ref)
+
+    # 2) Stripe por ID manual.
+    if not pago_confirmado and stripe_id_manual:
+        pago_confirmado = obtener_pago_stripe_por_session_o_intent(
+            stripe_id_manual,
+            external_reference_esperada=ext_ref,
+            monto_esperado=total_reserva
+        )
+
+    # 3) Stripe por Session ID guardado en cualquier boleto de esa compra.
     if not pago_confirmado:
         stripe_session_id = ""
         for _, r in grupo_reserva.iterrows():
@@ -824,7 +1023,7 @@ def verificar_y_recuperar_boletos_desde_reserva(conn: GSheetsConnection, numero_
                 monto_esperado=total_reserva
             )
 
-    # 3) Stripe fallback: busca sesiones recientes pagadas por external_reference o correo.
+    # 4) Stripe fallback por sesiones recientes pagadas.
     if not pago_confirmado:
         pago_confirmado = buscar_pago_stripe_por_referencia_o_correo(
             external_reference=ext_ref,
@@ -837,7 +1036,6 @@ def verificar_y_recuperar_boletos_desde_reserva(conn: GSheetsConnection, numero_
         if datos:
             return datos
 
-        # Si ya existían ventas por idempotencia, intenta leerlas por referencia.
         df_v = leer_ventas(conn)
         ventas_ref = df_v[df_v["Referencia_Pago"].astype(str) == ext_ref]
         if not ventas_ref.empty:
@@ -1037,20 +1235,38 @@ def main():
         with col_b2:
             buscar_correo = st.text_input("Ingresa tu correo asociado:")
 
+        with st.expander("Búsqueda avanzada si Stripe no registró el retorno automático"):
+            buscar_ref = st.text_input("External Reference / Referencia de compra (opcional):", placeholder="RIFA-20260727...")
+            buscar_stripe_id = st.text_input("Stripe Session ID o Payment Intent (opcional):", placeholder="cs_test_... o pi_...")
+            buscar_mp_id = st.text_input("Mercado Pago Payment ID / Collection ID / Preference ID (opcional):", placeholder="123456789 o preference_id")
+            st.caption("Usa estos campos si el proveedor cobró, pero la app no registró la venta. Los ID pueden encontrarse en Stripe Dashboard o Mercado Pago.")
+
         if st.button("🔍 Verificar Pago y Descargar PDF", type="primary"):
-            if not buscar_num or not buscar_correo:
-                st.warning("Por favor, llena ambos campos.")
+            if not buscar_num and not buscar_correo and not buscar_ref and not buscar_stripe_id and not buscar_mp_id:
+                st.warning("Ingresa al menos un dato de búsqueda: boleto, correo, referencia, ID de Stripe o ID de Mercado Pago.")
             else:
                 with st.spinner("Buscando boletos y confirmando pago..."):
-                    datos = buscar_ventas_por_correo_boleto(conn, buscar_num, buscar_correo)
+                    datos = []
+                    if buscar_num and buscar_correo:
+                        datos = buscar_ventas_por_correo_boleto(conn, buscar_num, buscar_correo)
+
                     if not datos:
-                        datos = verificar_y_recuperar_boletos_desde_reserva(conn, buscar_num, buscar_correo)
+                        datos = verificar_y_recuperar_boletos_desde_reserva(
+                            conn,
+                            numero_boleto=buscar_num,
+                            correo=buscar_correo,
+                            external_reference_manual=buscar_ref,
+                            stripe_id_manual=buscar_stripe_id,
+                            mercado_pago_id_manual=buscar_mp_id
+                        )
 
                     if datos:
-                        st.success("✅ Boletos encontrados. Puedes descargar tu PDF.")
+                        st.success("✅ Boletos encontrados y/o recuperados. Puedes descargar tu PDF.")
                         procesar_descarga_pdf(datos)
                     else:
-                        st.error("No encontramos boletos pagados con esos datos. Si acabas de pagar, espera unos segundos y vuelve a intentar.")
+                        st.error("No encontramos boletos pagados con esos datos. Revisa el diagnóstico de reservas y confirma que el pago en Stripe esté como pagado.")
+                        st.write("**Diagnóstico de Reservas:**")
+                        st.json(diagnosticar_reservas_usuario(conn, buscar_num, buscar_correo, buscar_ref))
                         mostrar_diagnostico_pagos()
 
     with tab1:
@@ -1233,4 +1449,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
