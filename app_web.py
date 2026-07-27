@@ -106,19 +106,68 @@ def safe_get(obj: Any, key: str, default=None):
             return default
         if isinstance(obj, dict):
             return obj.get(key, default)
+        if hasattr(obj, "to_dict_recursive"):
+            try:
+                data = obj.to_dict_recursive()
+                if isinstance(data, dict):
+                    return data.get(key, default)
+            except Exception:
+                pass
+        if hasattr(obj, "to_dict"):
+            try:
+                data = obj.to_dict()
+                if isinstance(data, dict):
+                    return data.get(key, default)
+            except Exception:
+                pass
+        if hasattr(obj, key):
+            return getattr(obj, key)
         if hasattr(obj, "get"):
             try:
                 return obj.get(key, default)
             except Exception:
                 pass
-        if hasattr(obj, key):
-            return getattr(obj, key)
         try:
             return obj[key]
         except Exception:
             return default
     except Exception:
         return default
+
+
+def safe_to_dict(obj: Any) -> Dict[str, Any]:
+    try:
+        if obj is None:
+            return {}
+        if isinstance(obj, dict):
+            return obj
+        if hasattr(obj, "to_dict_recursive"):
+            try:
+                data = obj.to_dict_recursive()
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                pass
+        if hasattr(obj, "to_dict"):
+            try:
+                data = obj.to_dict()
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                pass
+        return dict(obj) if obj else {}
+    except Exception:
+        return {}
+
+
+def safe_data_list(obj: Any) -> list:
+    data = safe_get(obj, "data", [])
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    try:
+        return list(data)
+    except Exception:
+        return []
 
 def parse_ticket_number(valor: Any) -> str:
     if pd.isna(valor) or str(valor).strip() == "":
@@ -394,36 +443,36 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
 
 
 def construir_pago_stripe_desde_session(session: Any, external_reference_reserva: str = "", correo_reserva: str = "", monto_esperado: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    if session.get("payment_status") != "paid":
+    session_dict = safe_to_dict(session)
+    if str(safe_get(session_dict, "payment_status", "")).strip().lower() != "paid":
         return None
-    metadata = dict(session.get("metadata") or {})
-    ref_stripe = str(metadata.get("external_reference") or session.get("client_reference_id") or "").strip()
-    customer_details = session.get("customer_details") or {}
-    correo_stripe = str(session.get("customer_email") or customer_details.get("email") or "").strip().lower()
+    metadata = dict(safe_get(session_dict, "metadata", {}) or {})
+    ref_stripe = str(metadata.get("external_reference") or safe_get(session_dict, "client_reference_id", "") or "").strip()
+    customer_details = safe_get(session_dict, "customer_details", {}) or {}
+    correo_stripe = str(safe_get(session_dict, "customer_email", "") or safe_get(customer_details, "email", "") or "").strip().lower()
     correo_reserva = str(correo_reserva or "").strip().lower()
     monto_ok = True
     if monto_esperado is not None:
-        monto_ok = int(session.get("amount_total") or 0) == int(round(float(monto_esperado) * 100))
+        monto_ok = int(safe_get(session_dict, "amount_total", 0) or 0) == int(round(float(monto_esperado) * 100))
     ref_ok = bool(external_reference_reserva and ref_stripe == external_reference_reserva)
     correo_ok = bool(correo_reserva and correo_stripe == correo_reserva)
     if external_reference_reserva and not (ref_ok or (correo_ok and monto_ok)):
         return None
-    payment_intent = session.get("payment_intent")
+    payment_intent = safe_get(session_dict, "payment_intent", None)
     if isinstance(payment_intent, str):
         payment_intent_id = payment_intent
     elif payment_intent:
-        payment_intent_id = str(payment_intent.get("id", ""))
+        payment_intent_id = str(safe_get(payment_intent, "id", ""))
     else:
-        payment_intent_id = str(session.get("id", ""))
+        payment_intent_id = str(safe_get(session_dict, "id", ""))
     return {
         "id": payment_intent_id,
         "external_reference": ref_stripe or external_reference_reserva,
         "payment_type_id": "stripe_card",
         "status": "approved",
         "provider": "STRIPE",
-        "provider_session_id": str(session.get("id", ""))
+        "provider_session_id": str(safe_get(session_dict, "id", ""))
     }
-
 
 def obtener_pago_stripe(stripe_session_id: str, external_reference_esperada: Optional[str] = None, monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY or not stripe_session_id:
@@ -456,7 +505,7 @@ def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_refe
                 limit=1,
                 expand=["data.payment_intent"]
             )
-            data = safe_get(sesiones, "data", [])
+            data = safe_data_list(sesiones)
             if data:
                 pago_desde_sesion = construir_pago_stripe_desde_session(
                     session=data[0],
@@ -557,7 +606,7 @@ def buscar_pago_stripe_payment_intent_por_correo_fecha(external_reference: str, 
             if starting_after:
                 params["starting_after"] = starting_after
             intents = stripe.PaymentIntent.list(**params)
-            data = safe_get(intents, "data", [])
+            data = safe_data_list(intents)
             for intent in data:
                 estado_intent = str(safe_get(intent, "status", "")).strip().lower()
                 if estado_intent != "succeeded":
