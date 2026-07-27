@@ -18,10 +18,10 @@ import mercadopago
 import stripe
 
 # -----------------------------
-# Configuración del Sistema y Proveedores de Pago
+# Configuracion del Sistema y Proveedores de Pago
 # -----------------------------
-TIEMPO_RESERVA_MINUTOS = 1440   # 24 hrs (Reserva formal en Base de Datos)
-TIEMPO_PRERESERVA_MINUTOS = 15  # 15 mins (Carrito temporal en Memoria)
+TIEMPO_RESERVA_MINUTOS = 1440
+TIEMPO_PRERESERVA_MINUTOS = 15
 
 
 def obtener_config(nombre: str, default: str = "") -> str:
@@ -30,11 +30,9 @@ def obtener_config(nombre: str, default: str = "") -> str:
             return str(st.secrets[nombre]).strip()
     except Exception:
         pass
-
     env_valor = os.getenv(nombre)
     if env_valor is not None:
         return str(env_valor).strip()
-
     return default
 
 
@@ -54,7 +52,7 @@ if STRIPE_SECRET_KEY:
 
 
 # -----------------------------
-# Utilidades Generales
+# Utilidades
 # -----------------------------
 def normalizar_url(url: str) -> str:
     url = str(url or "").strip()
@@ -112,7 +110,7 @@ def diagnostico_configuracion_pagos() -> Dict[str, Any]:
 def mostrar_diagnostico_pagos():
     if not DEBUG_PAGOS:
         return
-    with st.expander("🔎 Diagnóstico técnico de pagos"):
+    with st.expander("Diagnostico tecnico de pagos"):
         st.json(diagnostico_configuracion_pagos())
         if st.session_state.get("ultimo_error_pago"):
             st.code(st.session_state.ultimo_error_pago)
@@ -121,7 +119,7 @@ def mostrar_diagnostico_pagos():
 
 
 # -----------------------------
-# Caché Global para Pre-Reservas
+# Reservas en memoria
 # -----------------------------
 @st.cache_resource
 def obtener_pre_reservas_globales() -> dict:
@@ -135,9 +133,6 @@ def limpiar_pre_reservas_expiradas(pre_reservas: dict):
         del pre_reservas[k]
 
 
-# -----------------------------
-# Estilos CSS
-# -----------------------------
 CSS_CUSTOM = """
 <style>
    [data-testid="column"] { padding: 0 4px !important; }
@@ -194,7 +189,7 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
             [Paragraph("<b>Nombre:</b>", estilo_normal), Paragraph(str(boleto.get("Nombre", "")), estilo_normal)],
             [Paragraph("<b>N° de Boleto:</b>", estilo_normal), Paragraph(str(boleto.get("Numero_Boleto", "")), estilo_normal)],
             [Paragraph("<b>Precio Pagado:</b>", estilo_normal), Paragraph(f"${precio_float:.2f} {MP_CURRENCY_ID}", estilo_normal)],
-            [Paragraph("<b>Método de Pago:</b>", estilo_normal), Paragraph(str(boleto.get("Metodo_Pago", "Pago electrónico")).upper(), estilo_normal)],
+            [Paragraph("<b>Metodo de Pago:</b>", estilo_normal), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_normal)],
             [Paragraph("<b>Ref / ID Pago:</b>", estilo_normal), Paragraph(str(boleto.get("Codigo_Pago", "N/A")), estilo_normal)],
             [Paragraph("<b>Fecha:</b>", estilo_normal), Paragraph(str(boleto.get("Fecha_Compra", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))), estilo_normal)]
         ]
@@ -220,7 +215,7 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
     archivo_pdf = generar_pdf_boleto(datos_boletos)
     with open(archivo_pdf, "rb") as pdf_file:
         pdf_bytes = pdf_file.read()
-    label = "⬇️ Descargar mis Boletos Oficiales (PDF)" if len(datos_boletos) > 1 else "⬇️ Descargar mi Boleto Oficial (PDF)"
+    label = "Descargar mis Boletos Oficiales (PDF)" if len(datos_boletos) > 1 else "Descargar mi Boleto Oficial (PDF)"
     st.download_button(label=label, data=pdf_bytes, file_name=archivo_pdf, mime="application/pdf", type="primary", use_container_width=True)
 
 
@@ -275,10 +270,11 @@ def leer_ventas(conn: GSheetsConnection) -> pd.DataFrame:
 
 def obtener_estado_boletos_bd(df_ventas: pd.DataFrame, df_reservas: pd.DataFrame) -> dict:
     estados = {}
+    estados_reserva_bloqueantes = ["PENDIENTE", "ERROR_CONFIRMACION_STRIPE", "ERROR_CONFIRMACION_MERCADO_PAGO"]
 
     if not df_reservas.empty and "Numero_Boleto" in df_reservas.columns:
         for _, row in df_reservas.iterrows():
-            if str(row.get("Estado_Reserva", "")).strip().upper() in ["PENDIENTE", "ERROR_CONFIRMACION_STRIPE", "ERROR_CONFIRMACION_MERCADO_PAGO"]:
+            if str(row.get("Estado_Reserva", "")).strip().upper() in estados_reserva_bloqueantes:
                 try:
                     expira = pd.to_datetime(str(row.get("Expira_En"))).to_pydatetime()
                 except Exception:
@@ -306,7 +302,7 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
             asegurar_columnas(pd.DataFrame(ordenes), columnas_reservas())
         ], ignore_index=True)
         conn.update(worksheet="Reservas", data=df_actualizado)
-        return True, "Éxito"
+        return True, "Exito"
     except Exception as e:
         return False, str(e)
 
@@ -316,14 +312,14 @@ def actualizar_ids_proveedores_reserva(conn: GSheetsConnection, external_referen
         df_r = leer_reservas(conn)
         filtro = df_r["External_Reference"].astype(str) == str(external_reference)
         if not filtro.any():
-            return False, "No se encontró la reserva para actualizar."
+            return False, "No se encontro la reserva para actualizar."
         if mercado_pago_preference_id:
             df_r.loc[filtro, "MercadoPago_Preference_ID"] = mercado_pago_preference_id
         if stripe_session_id:
             df_r.loc[filtro, "Stripe_Session_ID"] = stripe_session_id
         df_r.loc[filtro, "Fecha_Actualizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn.update(worksheet="Reservas", data=df_r)
-        return True, "Éxito"
+        return True, "Exito"
     except Exception as e:
         return False, str(e)
 
@@ -335,11 +331,11 @@ def marcar_reserva_estado(conn: GSheetsConnection, external_reference: str, esta
         df_r = leer_reservas(conn)
         filtro = df_r["External_Reference"].astype(str) == str(external_reference)
         if not filtro.any():
-            return False, "No se encontró la reserva."
+            return False, "No se encontro la reserva."
         df_r.loc[filtro, "Estado_Reserva"] = estado
         df_r.loc[filtro, "Fecha_Actualizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn.update(worksheet="Reservas", data=df_r)
-        return True, "Éxito"
+        return True, "Exito"
     except Exception as e:
         return False, str(e)
 
@@ -347,11 +343,11 @@ def marcar_reserva_estado(conn: GSheetsConnection, external_reference: str, esta
 def liberar_reserva_por_rechazo_o_cancelacion(conn: GSheetsConnection, external_reference: str, motivo: str = "CANCELADO_PAGO") -> Tuple[bool, str]:
     try:
         if not external_reference:
-            return False, "No se recibió External_Reference para liberar la reserva."
+            return False, "No se recibio External_Reference para liberar la reserva."
         df_r = leer_reservas(conn)
         filtro = df_r["External_Reference"].astype(str) == str(external_reference)
         if not filtro.any():
-            return True, "No había reservas por liberar."
+            return True, "No habia reservas por liberar."
         df_r.loc[filtro, "Estado_Reserva"] = motivo
         df_r.loc[filtro, "Fecha_Actualizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn.update(worksheet="Reservas", data=df_r)
@@ -374,7 +370,7 @@ def limpiar_carrito_local():
 
 
 # -----------------------------
-# Proveedores de pago
+# Proveedores de Pago
 # -----------------------------
 def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_boletos: list, monto_unitario, external_reference, custom_return_scheme: Optional[str] = None):
     if not sdk:
@@ -409,11 +405,11 @@ def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_
 
 def crear_sesion_stripe(nombre: str, apellidos: str, correo: str, numeros_boletos: List[str], monto_unitario: float, external_reference: str) -> Tuple[str, str]:
     if not STRIPE_SECRET_KEY:
-        raise ValueError("STRIPE_SECRET_KEY no está configurado.")
+        raise ValueError("STRIPE_SECRET_KEY no esta configurado.")
     if STRIPE_SECRET_KEY.startswith("pk_"):
-        raise ValueError("STRIPE_SECRET_KEY contiene una llave pública pk_. Usa sk_test_ o sk_live_.")
+        raise ValueError("STRIPE_SECRET_KEY contiene una llave publica pk_. Usa sk_test_ o sk_live_.")
     if not STRIPE_RETURN_URL:
-        raise ValueError("STRIPE_RETURN_URL no está configurado.")
+        raise ValueError("STRIPE_RETURN_URL no esta configurado.")
 
     url_base = normalizar_url(STRIPE_RETURN_URL)
     success_url = agregar_parametros_url(url_base, {"stripe_session_id": "{CHECKOUT_SESSION_ID}", "external_reference": external_reference})
@@ -452,6 +448,7 @@ def construir_pago_stripe_desde_session(session: Any, external_reference_reserva
 
     ref_ok = bool(external_reference_reserva and ref_stripe == external_reference_reserva)
     correo_ok = bool(correo_reserva and correo_stripe == correo_reserva)
+
     if external_reference_reserva and not (ref_ok or (correo_ok and monto_ok)):
         return None
 
@@ -538,7 +535,8 @@ def buscar_pago_mercadopago_por_referencia_o_correo(external_reference: str = ""
                     return pago
 
         if correo_buscado:
-            for consulta in [{"payer.email": correo_buscado}, {"payer_email": correo_buscado}]:
+            consultas = [{"payer.email": correo_buscado}, {"payer_email": correo_buscado}]
+            for consulta in consultas:
                 try:
                     pagos = sdk.payment().search(consulta).get("response", {}).get("results", [])
                 except Exception:
@@ -581,12 +579,14 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
 
     df_r.loc[filtro_reserva, "Estado_Reserva"] = "PAGADO"
     df_r.loc[filtro_reserva, "Fecha_Actualizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     if proveedor == "STRIPE":
         df_r.loc[filtro_reserva, "Stripe_Payment_ID"] = pago_id
         if provider_session_id:
             df_r.loc[filtro_reserva, "Stripe_Session_ID"] = provider_session_id
     else:
         df_r.loc[filtro_reserva, "MercadoPago_Payment_ID"] = pago_id
+
     conn.update(worksheet="Reservas", data=df_r)
 
     nuevas_ventas = []
@@ -637,7 +637,10 @@ def recuperar_boletos_por_reserva(conn: GSheetsConnection, numero_boleto: str, c
     grupo = df_r[df_r["External_Reference"].astype(str) == ext_ref]
     total = float(grupo["Monto"].astype(float).sum()) if not grupo.empty else None
 
+    # 1. Mercado Pago: external_reference/correo/monto
     pago = buscar_pago_mercadopago_por_referencia_o_correo(ext_ref, correo_limpio, total)
+
+    # 2. Stripe por session guardada
     if not pago:
         stripe_session_id = ""
         for _, r in grupo.iterrows():
@@ -647,6 +650,8 @@ def recuperar_boletos_por_reserva(conn: GSheetsConnection, numero_boleto: str, c
                 break
         if stripe_session_id:
             pago = obtener_pago_stripe(stripe_session_id, ext_ref, total, correo_limpio)
+
+    # 3. Stripe fallback por sesiones recientes
     if not pago:
         pago = buscar_pago_stripe_por_referencia_o_correo(ext_ref, correo_limpio, total)
 
@@ -741,6 +746,7 @@ def procesar_retorno_pago(conn: GSheetsConnection):
     payment_id = qp_get(qp, "payment_id", "") or qp_get(qp, "collection_id", "")
     ext_ref = qp_get(qp, "external_reference", "") or st.session_state.get("external_ref_activa", "")
 
+    # Mercado Pago cancelado/rechazado
     if mp_return == "failure" or mp_status in ["rejected", "cancelled", "canceled", "failure", "failed"]:
         liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_MERCADO_PAGO")
         limpiar_carrito_local()
@@ -748,6 +754,7 @@ def procesar_retorno_pago(conn: GSheetsConnection):
         st.warning("Pago cancelado o rechazado. La reserva fue liberada.")
         st.rerun()
 
+    # Mercado Pago aprobado
     if payment_id and mp_status == "approved":
         pago = None
         try:
@@ -770,12 +777,14 @@ def procesar_retorno_pago(conn: GSheetsConnection):
         else:
             marcar_reserva_estado(conn, ext_ref, "ERROR_CONFIRMACION_MERCADO_PAGO")
             st.query_params.clear()
-            st.warning("El pago está en validación. Puedes recuperarlo en 'Buscar mis Boletos / Verificar Pago'.")
+            st.warning("El pago esta en validacion. Puedes recuperarlo en Buscar mis Boletos / Verificar Pago.")
 
+    # Mercado Pago pendiente
     if mp_return == "pending" or mp_status == "pending":
         st.query_params.clear()
         st.warning("Pago pendiente. La reserva se mantiene activa hasta confirmar el pago.")
 
+    # Stripe cancelado
     if "stripe_cancelled" in qp:
         liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_STRIPE")
         limpiar_carrito_local()
@@ -783,6 +792,7 @@ def procesar_retorno_pago(conn: GSheetsConnection):
         st.warning("Pago cancelado o rechazado. La reserva fue liberada.")
         st.rerun()
 
+    # Stripe aprobado
     stripe_session_id = qp_get(qp, "stripe_session_id", "")
     if stripe_session_id:
         pago = obtener_pago_stripe(stripe_session_id, ext_ref if ext_ref else None)
@@ -795,13 +805,25 @@ def procesar_retorno_pago(conn: GSheetsConnection):
             st.query_params.clear()
             st.rerun()
         else:
-            ok, _ = marcar_reserva_estado(conn, ext_ref, "ERROR_CONFIRMACION_STRIPE")
+            marcar_reserva_estado(conn, ext_ref, "ERROR_CONFIRMACION_STRIPE")
             st.query_params.clear()
-            st.warning("El pago está en validación. Puedes recuperarlo en 'Buscar mis Boletos / Verificar Pago'.")
+            st.warning("El pago esta en validacion. Puedes recuperarlo en Buscar mis Boletos / Verificar Pago.")
 
 
 def inicializar_estado():
-    defaults = {"session_id": str(uuid.uuid4()), "selected_tickets": [], "payment_success_id": None, "pago_generado_url": None, "stripe_pago_url": None, "stripe_session_id": None, "payment_provider": None, "errores_proveedores": [], "ultimo_error_pago": "", "external_ref_activa": None, "boletos_confirmados": []}
+    defaults = {
+        "session_id": str(uuid.uuid4()),
+        "selected_tickets": [],
+        "payment_success_id": None,
+        "pago_generado_url": None,
+        "stripe_pago_url": None,
+        "stripe_session_id": None,
+        "payment_provider": None,
+        "errores_proveedores": [],
+        "ultimo_error_pago": "",
+        "external_ref_activa": None,
+        "boletos_confirmados": []
+    }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -813,32 +835,32 @@ def main():
     inicializar_estado()
 
     if not MP_ACCESS_TOKEN:
-        st.warning("⚠️ Mercado Pago no está configurado.")
+        st.warning("Mercado Pago no esta configurado.")
     if not STRIPE_SECRET_KEY:
-        st.warning("⚠️ Stripe no está configurado.")
+        st.warning("Stripe no esta configurado.")
 
     conn = st.connection("gsheets", type=GSheetsConnection)
     procesar_retorno_pago(conn)
 
-    st.title("📱 Plataforma de Boletos - Gran Rifa")
-    tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🔍 Buscar mis Boletos / Verificar Pago"])
+    st.title("Plataforma de Boletos - Gran Rifa")
+    tab1, tab2 = st.tabs(["Comprar Boletos", "Buscar mis Boletos / Verificar Pago"])
 
     with tab2:
         st.markdown("### Consulta tus boletos")
         col_b1, col_b2 = st.columns(2)
         with col_b1:
-            buscar_num = st.text_input("Número de boleto (ej. 005):")
+            buscar_num = st.text_input("Numero de boleto (ej. 005):")
         with col_b2:
             buscar_correo = st.text_input("Correo asociado:")
 
-        if st.button("🔍 Verificar Pago y Descargar PDF", type="primary"):
+        if st.button("Verificar Pago y Descargar PDF", type="primary"):
             if not buscar_num or not buscar_correo:
                 st.warning("Ingresa boleto y correo.")
             else:
                 with st.spinner("Verificando pago y recuperando boletos..."):
                     datos = recuperar_boletos_por_reserva(conn, buscar_num, buscar_correo)
                     if datos:
-                        st.success("✅ Boletos encontrados. Puedes descargar tu PDF.")
+                        st.success("Boletos encontrados. Puedes descargar tu PDF.")
                         procesar_descarga_pdf(datos)
                     else:
                         st.error("No encontramos boletos pagados con esos datos. Verifica correo y boleto o intenta nuevamente en unos segundos.")
@@ -847,10 +869,10 @@ def main():
     with tab1:
         if st.session_state.get("boletos_confirmados"):
             st.balloons()
-            st.success(f"🎉 ¡Compra Confirmada! (ID: {st.session_state.get('payment_success_id', 'N/A')})")
+            st.success(f"Compra Confirmada. ID: {st.session_state.get('payment_success_id', 'N/A')}")
             procesar_descarga_pdf(st.session_state.boletos_confirmados)
             st.write("---")
-            if st.button("⬅️ Realizar otra compra", use_container_width=True):
+            if st.button("Realizar otra compra", use_container_width=True):
                 st.session_state.boletos_confirmados = []
                 st.session_state.payment_success_id = None
                 limpiar_carrito_local()
@@ -859,36 +881,38 @@ def main():
 
         col_mapa, col_form = st.columns([1.5, 1], gap="large")
         with col_mapa:
-            st.subheader("🎟️ Mapa de Disponibilidad")
+            st.subheader("Mapa de Disponibilidad")
             renderizar_mapa_interactivo()
 
         with col_form:
-            st.subheader("🛒 Finalizar Compra")
+            st.subheader("Finalizar Compra")
             precio_base = 15.00
             boletos = st.session_state.selected_tickets
             with st.container(border=True):
                 if not boletos:
-                    st.info("👆 Selecciona uno o más boletos disponibles.")
+                    st.info("Selecciona uno o mas boletos disponibles.")
                     st.session_state.pago_generado_url = None
                     st.session_state.stripe_pago_url = None
                 else:
                     total_pagar = precio_base * len(boletos)
-                    st.success(f"🎫 **En tu carrito:** {', '.join(boletos)}")
+                    st.success(f"En tu carrito: {', '.join(boletos)}")
+
                     if st.session_state.pago_generado_url or st.session_state.stripe_pago_url:
                         st.write(f"### Total a pagar: ${total_pagar:.2f} MXN")
-                        opcion_pago = st.radio("Elige tu método de pago seguro:", ["💳 Mercado Pago", "💳 Stripe"], horizontal=True)
+                        opcion_pago = st.radio("Elige tu metodo de pago seguro:", ["Mercado Pago", "Stripe"], horizontal=True)
                         if "Mercado Pago" in opcion_pago:
                             if st.session_state.pago_generado_url:
-                                st.link_button("💳 Pagar en Mercado Pago ➔", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
+                                st.link_button("Pagar en Mercado Pago", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
                             else:
-                                st.error("Mercado Pago no está disponible.")
+                                st.error("Mercado Pago no esta disponible.")
                         else:
                             if st.session_state.stripe_pago_url:
-                                st.link_button("💳 Pagar con Stripe ➔", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
+                                st.link_button("Pagar con Stripe", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
                             else:
-                                st.error("Stripe no está disponible.")
+                                st.error("Stripe no esta disponible.")
+
                         st.write("---")
-                        if st.button("❌ Cancelar reserva y vaciar carrito"):
+                        if st.button("Cancelar reserva y vaciar carrito"):
                             ext_ref = st.session_state.get("external_ref_activa", "")
                             if ext_ref:
                                 liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_USUARIO")
@@ -900,33 +924,54 @@ def main():
                             nombre = st.text_input("Nombre(s):")
                         with col_ape:
                             apellidos = st.text_input("Apellidos:")
+
                         col_usr, col_dom = st.columns([3, 2.5])
                         with col_usr:
                             correo_usuario = st.text_input("Correo (sin @):", placeholder="ej. juanperez")
                         with col_dom:
-                            dominio = st.selectbox("Extensión:", ["@gmail.com", "@hotmail.com", "@outlook.com", "@yahoo.com", "Otro..."])
+                            dominio = st.selectbox("Extension:", ["@gmail.com", "@hotmail.com", "@outlook.com", "@yahoo.com", "Otro..."])
+
                         correo = st.text_input("Correo completo:", placeholder="usuario@empresa.com") if dominio == "Otro..." else f"{correo_usuario.replace('@', '').strip()}{dominio}" if correo_usuario else ""
-                        telefono = st.text_input("WhatsApp (10 dígitos):", max_chars=10)
+                        telefono = st.text_input("WhatsApp (10 digitos):", max_chars=10)
                         st.write(f"**Total a Pagar:** ${total_pagar:.2f} MXN")
 
-                        if st.button("🔒 Confirmar y Elegir Método de Pago", type="primary", use_container_width=True):
+                        if st.button("Confirmar y Elegir Metodo de Pago", type="primary", use_container_width=True):
                             pre_reservas = obtener_pre_reservas_globales()
                             ahora = datetime.now()
                             siguen_validos = all(t in pre_reservas and pre_reservas[t]["session_id"] == st.session_state.session_id and pre_reservas[t]["expires_at"] > ahora for t in boletos)
                             correo_valido = re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}$", correo.strip().lower())
+
                             if not siguen_validos:
-                                st.error("⚠️ El tiempo de carrito expiró. Selecciona nuevamente.")
+                                st.error("El tiempo de carrito expiro. Selecciona nuevamente.")
                                 st.session_state.selected_tickets = []
                             elif not nombre or not apellidos or not correo or not telefono:
-                                st.error("⚠️ Completa todos los campos.")
+                                st.error("Completa todos los campos.")
                             elif not correo_valido:
-                                st.error("⚠️ El formato del correo NO es válido.")
+                                st.error("El formato del correo NO es valido.")
                             elif not (telefono.isdigit() and len(telefono) == 10):
-                                st.error("⚠️ El número debe contener 10 dígitos numéricos.")
+                                st.error("El numero debe contener 10 digitos numericos.")
                             else:
                                 ref = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
                                 st.session_state.external_ref_activa = ref
-                                ordenes = [{"External_Reference": ref, "MercadoPago_Preference_ID": "", "MercadoPago_Payment_ID": "", "Stripe_Session_ID": "", "Stripe_Payment_ID": "", "Numero_Boleto": str(t), "Nombre": f"{nombre.strip()} {apellidos.strip()}", "Correo": correo.strip().lower(), "Numero_Telefonico": telefono, "Monto": float(precio_base), "Estado_Reserva": "PENDIENTE", "Fecha_Creacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Expira_En": (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"), "Fecha_Actualizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S")} for t in boletos]
+                                ordenes = []
+                                for t in boletos:
+                                    ordenes.append({
+                                        "External_Reference": ref,
+                                        "MercadoPago_Preference_ID": "",
+                                        "MercadoPago_Payment_ID": "",
+                                        "Stripe_Session_ID": "",
+                                        "Stripe_Payment_ID": "",
+                                        "Numero_Boleto": str(t),
+                                        "Nombre": f"{nombre.strip()} {apellidos.strip()}",
+                                        "Correo": correo.strip().lower(),
+                                        "Numero_Telefonico": telefono,
+                                        "Monto": float(precio_base),
+                                        "Estado_Reserva": "PENDIENTE",
+                                        "Fecha_Creacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "Expira_En": (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
+                                        "Fecha_Actualizacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    })
+
                                 exito, msg = registrar_reserva_cobro(conn, ordenes)
                                 if exito:
                                     errores = []
@@ -935,15 +980,18 @@ def main():
                                         pref_id, init_point = crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, boletos, precio_base, ref)
                                     except Exception as e:
                                         errores.append(f"Mercado Pago: {e}")
+
                                     stripe_session_id, stripe_checkout_url = "", ""
                                     try:
                                         stripe_session_id, stripe_checkout_url = crear_sesion_stripe(nombre, apellidos, correo, boletos, precio_base, ref)
                                     except Exception as e:
                                         errores.append(f"Stripe: {e}")
+
                                     st.session_state.pago_generado_url = init_point
                                     st.session_state.stripe_session_id = stripe_session_id
                                     st.session_state.stripe_pago_url = stripe_checkout_url
                                     actualizar_ids_proveedores_reserva(conn, ref, pref_id, stripe_session_id)
+
                                     if not init_point and not stripe_checkout_url:
                                         liberar_reserva_por_rechazo_o_cancelacion(conn, ref, "ERROR_GENERACION_PAGO")
                                         limpiar_carrito_local()
