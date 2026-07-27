@@ -43,7 +43,6 @@ MP_CURRENCY_ID = obtener_config("MP_CURRENCY_ID", "MXN")
 STRIPE_SECRET_KEY = obtener_config("STRIPE_SECRET_KEY")
 STRIPE_RETURN_URL = obtener_config("STRIPE_RETURN_URL")
 STRIPE_CURRENCY_ID = obtener_config("STRIPE_CURRENCY_ID", "mxn").lower()
-
 DEBUG_PAGOS = obtener_config("DEBUG_PAGOS", "false").lower() in ["1", "true", "si", "yes", "on"]
 
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if MP_ACCESS_TOKEN else None
@@ -109,7 +108,7 @@ def parse_ticket_number(valor: Any) -> str:
         return str(valor).strip().zfill(3)
 
 
-def normalizar_fecha_unix(fecha_txt: str, dias_antes: int = 2, dias_despues: int = 2) -> dict:
+def normalizar_fecha_unix(fecha_txt: str, dias_antes: int = 5, dias_despues: int = 5) -> dict:
     try:
         fecha = pd.to_datetime(str(fecha_txt)).to_pydatetime()
     except Exception:
@@ -130,6 +129,7 @@ def mostrar_diagnostico_pagos():
             "STRIPE_SECRET_KEY_configurado": bool(STRIPE_SECRET_KEY),
             "STRIPE_SECRET_KEY_es_sk": str(STRIPE_SECRET_KEY).startswith("sk_"),
             "STRIPE_RETURN_URL": STRIPE_RETURN_URL or "NO CONFIGURADO",
+            "STRIPE_CURRENCY_ID": STRIPE_CURRENCY_ID,
             "ultimo_error_pago": st.session_state.get("ultimo_error_pago", ""),
         })
 
@@ -148,9 +148,9 @@ def limpiar_pre_reservas_expiradas(pre_reservas: dict):
 
 def limpiar_carrito_local():
     pre_reservas = obtener_pre_reservas_globales()
-    for t in list(st.session_state.get("selected_tickets", [])):
-        if t in pre_reservas and pre_reservas[t]["session_id"] == st.session_state.session_id:
-            del pre_reservas[t]
+    for boleto in list(st.session_state.get("selected_tickets", [])):
+        if boleto in pre_reservas and pre_reservas[boleto]["session_id"] == st.session_state.session_id:
+            del pre_reservas[boleto]
     st.session_state.selected_tickets = []
     st.session_state.pago_generado_url = None
     st.session_state.stripe_pago_url = None
@@ -415,6 +415,51 @@ def obtener_pago_stripe(stripe_session_id: str, external_reference_esperada: Opt
         return None
 
 
+def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_reference_esperada: Optional[str] = None, monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
+    if not STRIPE_SECRET_KEY or not payment_intent_id:
+        return None
+    payment_intent_id = str(payment_intent_id or "").strip()
+    if not payment_intent_id.startswith("pi_"):
+        return None
+    try:
+        sesiones = stripe.checkout.Session.list(payment_intent=payment_intent_id, limit=1, expand=["data.payment_intent"])
+        data = sesiones.get("data", [])
+        if data:
+            return construir_pago_stripe_desde_session(data[0], external_reference_esperada or "", correo_reserva, monto_esperado)
+
+        intent = stripe.PaymentIntent.retrieve(payment_intent_id, expand=["latest_charge"])
+        if intent.get("status") != "succeeded":
+            return None
+        if monto_esperado is not None:
+            monto_esperado_centavos = int(round(float(monto_esperado) * 100))
+            monto_recibido_centavos = int(intent.get("amount") or 0)
+            if monto_recibido_centavos != monto_esperado_centavos:
+                return None
+        metadata = dict(intent.get("metadata") or {})
+        ref_intent = str(metadata.get("external_reference") or "").strip()
+        latest_charge = intent.get("latest_charge") or {}
+        billing_details = latest_charge.get("billing_details") if isinstance(latest_charge, dict) else {}
+        correo_stripe = str((billing_details or {}).get("email") or intent.get("receipt_email") or "").strip().lower()
+        correo_reserva = str(correo_reserva or "").strip().lower()
+
+        if external_reference_esperada and ref_intent and ref_intent != external_reference_esperada:
+            return None
+        if correo_reserva and correo_stripe and correo_stripe != correo_reserva:
+            return None
+
+        return {
+            "id": str(intent.get("id", payment_intent_id)),
+            "external_reference": ref_intent or external_reference_esperada or "",
+            "payment_type_id": "stripe_card",
+            "status": "approved",
+            "provider": "STRIPE",
+            "provider_session_id": ""
+        }
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"Stripe PaymentIntent retrieve: {e}"
+        return None
+
+
 def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY:
         return None
@@ -422,13 +467,7 @@ def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, corr
     correo = str(correo or "").strip().lower()
     rango_fecha = normalizar_fecha_unix(fecha_creacion_reserva)
     try:
-        parametros = {
-            "limit": 100,
-            "status": "complete",
-            "created": rango_fecha,
-            "customer_details": {"email": correo},
-            "expand": ["data.payment_intent"]
-        }
+        parametros = {"limit": 100, "status": "complete", "created": rango_fecha, "customer_details": {"email": correo}, "expand": ["data.payment_intent"]}
         sesiones = stripe.checkout.Session.list(**parametros)
         for session in sesiones.get("data", []):
             pago = construir_pago_stripe_desde_session(session, external_reference, correo, monto_esperado)
@@ -454,13 +493,12 @@ def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, corr
         return None
 
 
-
 def buscar_pago_stripe_payment_intent_por_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY:
         return None
     external_reference = str(external_reference or "").strip()
     correo = str(correo or "").strip().lower()
-    rango_fecha = normalizar_fecha_unix(fecha_creacion_reserva, dias_antes=5, dias_despues=5)
+    rango_fecha = normalizar_fecha_unix(fecha_creacion_reserva)
     monto_centavos = int(round(float(monto_esperado) * 100)) if monto_esperado is not None else None
     try:
         starting_after = None
@@ -499,6 +537,7 @@ def buscar_pago_stripe_payment_intent_por_correo_fecha(external_reference: str, 
     except Exception as e:
         st.session_state.ultimo_error_pago = f"Stripe PI conciliacion: {e}"
         return None
+
 
 def buscar_pago_mercadopago_por_referencia_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not sdk:
@@ -545,6 +584,105 @@ def buscar_pago_mercadopago_por_referencia_correo_fecha(external_reference: str,
         st.session_state.ultimo_error_pago = f"MP conciliacion: {e}"
         return None
 
+
+
+def extraer_ids_pago_de_reserva(grupo_reserva: pd.DataFrame) -> Dict[str, str]:
+    ids = {
+        "stripe_session_id": "",
+        "stripe_payment_id": "",
+        "mp_payment_id": "",
+        "mp_preference_id": ""
+    }
+    columnas_posibles = [
+        "Stripe_Session_ID", "Stripe_Payment_ID", "MercadoPago_Payment_ID", "MercadoPago_Preference_ID",
+        "External_Reference", "Numero_Boleto", "Nombre", "Correo", "Numero_Telefonico", "Monto",
+        "Estado_Reserva", "Fecha_Creacion", "Expira_En", "Fecha_Actualizacion"
+    ]
+    for _, fila in grupo_reserva.iterrows():
+        for columna in columnas_posibles:
+            valor = str(fila.get(columna, "")).strip()
+            if not valor or valor.lower() == "nan":
+                continue
+            if valor.startswith("cs_") and not ids["stripe_session_id"]:
+                ids["stripe_session_id"] = valor
+            elif valor.startswith("pi_") and not ids["stripe_payment_id"]:
+                ids["stripe_payment_id"] = valor
+            elif valor.isdigit() and len(valor) >= 6 and not ids["mp_payment_id"]:
+                ids["mp_payment_id"] = valor
+            elif not valor.startswith(("cs_", "pi_")) and len(valor) >= 10 and not ids["mp_preference_id"]:
+                if columna == "MercadoPago_Preference_ID":
+                    ids["mp_preference_id"] = valor
+    return ids
+
+
+def obtener_pago_mercadopago_por_payment_id(payment_id: str, external_reference_esperada: str = "", monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
+    if not sdk or not payment_id:
+        return None
+    payment_id = str(payment_id or "").strip()
+    if not payment_id.isdigit():
+        return None
+    try:
+        pago = sdk.payment().get(payment_id).get("response", {})
+        if not pago or pago.get("status") != "approved":
+            return None
+        if monto_esperado is not None:
+            monto_pago = float(pago.get("transaction_amount", 0) or 0)
+            if abs(monto_pago - float(monto_esperado)) >= 0.01:
+                return None
+        ref_pago = str(pago.get("external_reference") or "").strip()
+        payer = pago.get("payer") or {}
+        correo_pago = str(payer.get("email") or "").strip().lower()
+        correo_reserva = str(correo_reserva or "").strip().lower()
+        if external_reference_esperada and ref_pago and ref_pago != external_reference_esperada:
+            return None
+        if correo_reserva and correo_pago and correo_pago != correo_reserva:
+            return None
+        pago["provider"] = "MERCADO_PAGO"
+        if not pago.get("external_reference") and external_reference_esperada:
+            pago["external_reference"] = external_reference_esperada
+        return pago
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"MP payment_id retrieve: {e}"
+        return None
+
+
+def buscar_pago_mercadopago_por_preference_id(preference_id: str, external_reference_esperada: str = "", monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
+    if not sdk or not preference_id:
+        return None
+    preference_id = str(preference_id or "").strip()
+    try:
+        filtros = [
+            {"preference_id": preference_id, "status": "approved", "sort": "date_created", "criteria": "desc"},
+            {"external_reference": external_reference_esperada, "status": "approved", "sort": "date_created", "criteria": "desc"}
+        ]
+        for filtro in filtros:
+            if not filtro.get("preference_id") and not filtro.get("external_reference"):
+                continue
+            respuesta = sdk.payment().search(filtro).get("response", {})
+            pagos = respuesta.get("results", [])
+            for pago in pagos:
+                if pago.get("status") != "approved":
+                    continue
+                if monto_esperado is not None:
+                    monto_pago = float(pago.get("transaction_amount", 0) or 0)
+                    if abs(monto_pago - float(monto_esperado)) >= 0.01:
+                        continue
+                ref_pago = str(pago.get("external_reference") or "").strip()
+                payer = pago.get("payer") or {}
+                correo_pago = str(payer.get("email") or "").strip().lower()
+                correo_reserva_limpio = str(correo_reserva or "").strip().lower()
+                if external_reference_esperada and ref_pago and ref_pago != external_reference_esperada:
+                    continue
+                if correo_reserva_limpio and correo_pago and correo_pago != correo_reserva_limpio:
+                    continue
+                pago["provider"] = "MERCADO_PAGO"
+                if not pago.get("external_reference") and external_reference_esperada:
+                    pago["external_reference"] = external_reference_esperada
+                return pago
+        return None
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"MP preference_id search: {e}"
+        return None
 
 def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_boletos: list, monto_unitario: float, external_reference: str):
     if not sdk:
@@ -618,26 +756,34 @@ def recuperar_boletos_por_reserva(conn: GSheetsConnection, numero_boleto: str, c
     grupo = df_r[df_r["External_Reference"].astype(str) == ext_ref]
     total = float(grupo["Monto"].astype(float).sum()) if not grupo.empty else None
     fecha_creacion = str(reserva_base.get("Fecha_Creacion", ""))
+    ids_pago = extraer_ids_pago_de_reserva(grupo)
 
-    # 1. Mercado Pago: confirma pago aprobado antes de entregar PDF.
-    pago = buscar_pago_mercadopago_por_referencia_correo_fecha(ext_ref, correo_limpio, total, fecha_creacion)
+    pago = None
 
-    # 2. Stripe: intenta por Checkout Session guardada en Sheets.
+    # Mercado Pago por payment_id directo, si existe o si quedo en otra columna.
+    if ids_pago.get("mp_payment_id"):
+        pago = obtener_pago_mercadopago_por_payment_id(ids_pago["mp_payment_id"], ext_ref, total, correo_limpio)
+
+    # Mercado Pago por preference_id o external_reference.
+    if not pago and ids_pago.get("mp_preference_id"):
+        pago = buscar_pago_mercadopago_por_preference_id(ids_pago["mp_preference_id"], ext_ref, total, correo_limpio)
+
     if not pago:
-        stripe_session_id = ""
-        for _, r in grupo.iterrows():
-            posible = str(r.get("Stripe_Session_ID", "")).strip()
-            if posible and posible.lower() != "nan":
-                stripe_session_id = posible
-                break
-        if stripe_session_id:
-            pago = obtener_pago_stripe(stripe_session_id, ext_ref, total, correo_limpio)
+        pago = buscar_pago_mercadopago_por_referencia_correo_fecha(ext_ref, correo_limpio, total, fecha_creacion)
 
-    # 3. Stripe: intenta por Checkout Sessions si la session no quedo guardada.
+    # Stripe por session id.
+    if not pago and ids_pago.get("stripe_session_id"):
+        pago = obtener_pago_stripe(ids_pago["stripe_session_id"], ext_ref, total, correo_limpio)
+
+    # Stripe por payment intent pi_ directo.
+    if not pago and ids_pago.get("stripe_payment_id", "").startswith("pi_"):
+        pago = obtener_pago_stripe_por_payment_intent(ids_pago["stripe_payment_id"], ext_ref, total, correo_limpio)
+
+    # Stripe por conciliacion de sesiones.
     if not pago:
         pago = buscar_pago_stripe_por_referencia_correo_fecha(ext_ref, correo_limpio, total, fecha_creacion)
 
-    # 4. Stripe: ultimo respaldo por PaymentIntent/Charge, util cuando Stripe cobro pero la sesion no se vinculo.
+    # Stripe por conciliacion de payment intents.
     if not pago:
         pago = buscar_pago_stripe_payment_intent_por_correo_fecha(ext_ref, correo_limpio, total, fecha_creacion)
 
@@ -709,10 +855,10 @@ def renderizar_mapa_interactivo():
     disponibles = TOTAL_BOLETOS - vendidos - reservados_bd - pre_reservados_otros - len(st.session_state.selected_tickets)
     st.markdown(f"""
     <div class="metric-container">
-        <div class="metric-box m-green"><h2>{disponibles}</h2><p>Libres</p></div>
-        <div class="metric-box m-gray"><h2>{pre_reservados_otros}</h2><p>En otro carrito</p></div>
-        <div class="metric-box m-yellow"><h2>{reservados_bd}</h2><p>Por pagar / validando</p></div>
-        <div class="metric-box m-red"><h2>{vendidos}</h2><p>Vendidos</p></div>
+        <div class="metric-box m-green"><h2>🟢 {disponibles}</h2><p>Libres</p></div>
+        <div class="metric-box m-gray"><h2>🔒 {pre_reservados_otros}</h2><p>En otro carrito</p></div>
+        <div class="metric-box m-yellow"><h2>🟠 {reservados_bd}</h2><p>Reservados / validando</p></div>
+        <div class="metric-box m-red"><h2>🔴 {vendidos}</h2><p>Vendidos</p></div>
     </div>
     """, unsafe_allow_html=True)
     for fila in range(10):
