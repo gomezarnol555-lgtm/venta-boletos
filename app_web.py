@@ -18,7 +18,7 @@ import mercadopago
 import stripe
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
-TOTAL_BOLETOS = 100
+TOTAL_BOLETOS = 10
 PRECIO_BOLETO = 15.00
 
 
@@ -52,10 +52,23 @@ CSS_CUSTOM = """
 <style>
 [data-testid="column"] { padding: 0 4px !important; }
 [data-testid="stButton"] button {
-    width: 100%; height: 55px; padding: 0;
-    font-weight: 700; font-size: 14px; transition: all 0.2s;
+    width: 100%;
+    height: 60px;
+    padding: 0;
+    font-weight: 800;
+    font-size: 13px;
+    line-height: 1.05;
+    transition: all 0.18s ease-in-out;
+    border-radius: 12px;
+    border: 1.5px dashed #94A3B8;
+    box-shadow: 0 2px 5px rgba(15, 23, 42, 0.10);
+    background-image: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(248,250,252,0.92));
 }
-[data-testid="stButton"] button:hover { transform: scale(1.02); border-color: #004481; }
+[data-testid="stButton"] button:hover {
+    transform: translateY(-1px) scale(1.02);
+    border-color: #004481;
+    box-shadow: 0 5px 12px rgba(15, 23, 42, 0.16);
+}
 .metric-container { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
 .metric-box {
     flex: 1; min-width: 120px; background: white; padding: 10px; border-radius: 8px; text-align: center;
@@ -68,8 +81,18 @@ CSS_CUSTOM = """
 .m-yellow { border-color: #F59E0B; }
 .m-red { border-color: #EF4444; }
 .small-help {color:#64748B; font-size: 0.9rem;}
+.ticket-legend {
+    margin: 6px 0 16px 0;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: #F8FAFC;
+    border: 1px solid #E2E8F0;
+    color: #334155;
+    font-size: 0.92rem;
+}
 </style>
 """
+
 
 
 def normalizar_url(url: str) -> str:
@@ -399,41 +422,156 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
 def dibujar_fondo_autenticidad(canvas, doc):
     width, height = doc.pagesize
     canvas.saveState()
+
+    # Fondo general
     canvas.setFillColor(colors.HexColor("#F8FAFC"))
     canvas.rect(0, 0, width, height, fill=1, stroke=0)
-    canvas.setStrokeColor(colors.HexColor("#0A2540"))
-    canvas.setLineWidth(1)
-    canvas.rect(24, 24, width - 48, height - 48, fill=0, stroke=1)
-    canvas.restoreState()
 
+    # Marca de agua diagonal de autenticidad
+    canvas.setFillColor(colors.Color(0.10, 0.18, 0.30, alpha=0.045))
+    canvas.setFont("Helvetica-Bold", 44)
+    canvas.translate(width / 2, height / 2)
+    canvas.rotate(32)
+    for y in range(-360, 420, 95):
+        canvas.drawCentredString(0, y, "BOLETO OFICIAL")
+    canvas.rotate(-32)
+    canvas.translate(-width / 2, -height / 2)
+
+    # Marco exterior
+    canvas.setStrokeColor(colors.HexColor("#0A2540"))
+    canvas.setLineWidth(1.1)
+    canvas.roundRect(24, 24, width - 48, height - 48, 16, fill=0, stroke=1)
+
+    # Banda superior e inferior
+    canvas.setFillColor(colors.HexColor("#0A2540"))
+    canvas.roundRect(42, height - 112, width - 84, 48, 10, fill=1, stroke=0)
+    canvas.roundRect(42, 58, width - 84, 26, 8, fill=1, stroke=0)
+
+    # Perforaciones laterales estilo ticket
+    canvas.setFillColor(colors.HexColor("#F8FAFC"))
+    for y in range(130, int(height - 135), 26):
+        canvas.circle(42, y, 6, fill=1, stroke=0)
+        canvas.circle(width - 42, y, 6, fill=1, stroke=0)
+
+    # Lineas punteadas internas
+    canvas.setStrokeColor(colors.HexColor("#CBD5E1"))
+    canvas.setDash(3, 4)
+    canvas.line(62, 118, width - 62, 118)
+    canvas.line(62, height - 130, width - 62, height - 130)
+    canvas.setDash()
+
+    canvas.restoreState()
 
 def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     boletos_txt = texto_boletos(datos_boletos) or "N/A"
     nombre_archivo = f"Boleto_{boletos_txt.replace(', ', '_')}.pdf"
-    doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=32, leftMargin=32, topMargin=52, bottomMargin=32)
-    story, styles = [], getSampleStyleSheet()
-    estilo_titulo = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=22, textColor=colors.HexColor("#0A2540"), alignment=1, spaceAfter=24)
-    estilo_boleto = ParagraphStyle("Boleto", parent=styles["Normal"], fontSize=22, leading=28, textColor=colors.HexColor("#0A2540"), alignment=1)
-    estilo_nota = ParagraphStyle("Nota", parent=styles["Normal"], fontSize=10, leading=12, textColor=colors.HexColor("#64748B"), alignment=1)
 
-    story.append(Paragraph("BOLETO OFICIAL", estilo_titulo))
-    story.append(Spacer(1, 28))
-    data = [[Paragraph("<b>Boleto:</b>", estilo_boleto), Paragraph(boletos_txt, estilo_boleto)]]
-    tabla = Table(data, colWidths=[140, 330])
-    tabla.setStyle(TableStyle([
-        ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor("#0A2540")),
-        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#E0F2FE")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    doc = SimpleDocTemplate(
+        nombre_archivo,
+        pagesize=letter,
+        rightMargin=48,
+        leftMargin=48,
+        topMargin=70,
+        bottomMargin=50
+    )
+
+    story = []
+    styles = getSampleStyleSheet()
+
+    estilo_titulo_blanco = ParagraphStyle(
+        "TituloBlanco",
+        parent=styles["Heading1"],
+        fontSize=20,
+        leading=24,
+        textColor=colors.white,
+        alignment=1,
+        spaceAfter=0
+    )
+
+    estilo_subtitulo = ParagraphStyle(
+        "Subtitulo",
+        parent=styles["Normal"],
+        fontSize=9.5,
+        leading=12,
+        textColor=colors.HexColor("#E2E8F0"),
+        alignment=1
+    )
+
+    estilo_boleto_label = ParagraphStyle(
+        "BoletoLabel",
+        parent=styles["Normal"],
+        fontSize=17,
+        leading=20,
+        textColor=colors.HexColor("#334155"),
+        alignment=1
+    )
+
+    estilo_boleto_numero = ParagraphStyle(
+        "BoletoNumero",
+        parent=styles["Heading1"],
+        fontSize=32,
+        leading=38,
+        textColor=colors.HexColor("#0A2540"),
+        alignment=1
+    )
+
+    estilo_nota = ParagraphStyle(
+        "NotaTicket",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=11,
+        textColor=colors.HexColor("#64748B"),
+        alignment=1
+    )
+
+    # Encabezado tipo ticket
+    encabezado = Table(
+        [[Paragraph("BOLETO OFICIAL", estilo_titulo_blanco)],
+         [Paragraph("Comprobante de boletos registrados", estilo_subtitulo)]],
+        colWidths=[500]
+    )
+    encabezado.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
+        ("BOX", (0, 0), (-1, -1), 0, colors.HexColor("#0A2540")),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+    ]))
+    story.append(encabezado)
+    story.append(Spacer(1, 52))
+
+    # Cuerpo tipo ticket: solo Boleto + numeros, sin IDs sensibles
+    cuerpo = Table(
+        [[Paragraph("Boleto:", estilo_boleto_label)],
+         [Paragraph(boletos_txt, estilo_boleto_numero)]],
+        colWidths=[500]
+    )
+    cuerpo.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFFFFF")),
+        ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor("#0A2540")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
         ("TOPPADDING", (0, 0), (-1, -1), 18),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 18),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
-    story.append(tabla)
-    story.append(Spacer(1, 28))
-    story.append(Paragraph("Conserve este documento como comprobante de sus boletos registrados.", estilo_nota))
+    story.append(cuerpo)
+    story.append(Spacer(1, 42))
+
+    nota = Table(
+        [[Paragraph("Documento generado automaticamente. No incluye claves ni referencias de pago sensibles.", estilo_nota)]],
+        colWidths=[500]
+    )
+    nota.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#CBD5E1")),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(nota)
+
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
-
 
 def procesar_descarga_pdf(datos_boletos: List[dict]):
     if not datos_boletos:
@@ -781,14 +919,14 @@ def renderizar_mapa_interactivo():
             estado = estados_pantalla[num]
             with cols[col_idx]:
                 if estado == "vendido_db":
-                    st.button(f"🔴\n{num}", disabled=True, key=f"btn_{num}", help="Vendido")
+                    st.button(f"🎟️\n🔴 {num}", disabled=True, key=f"btn_{num}", help="Vendido")
                 elif estado == "reservado_db":
-                    st.button(f"🟠\n{num}", disabled=True, key=f"btn_{num}", help="Reservado / validando pago")
+                    st.button(f"🎟️\n🟠 {num}", disabled=True, key=f"btn_{num}", help="Reservado / validando pago")
                 elif estado == "pre_reservado_otros":
-                    st.button(f"🔒\n{num}", disabled=True, key=f"btn_{num}", help="En carrito de otro usuario")
+                    st.button(f"🎟️\n🔒 {num}", disabled=True, key=f"btn_{num}", help="En carrito de otro usuario")
                 else:
                     seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
-                    etiqueta = f"✅\n{num}" if seleccionado else f"🟢\n{num}"
+                    etiqueta = f"🎟️\n✅ {num}" if seleccionado else f"🎟️\n🟢 {num}"
                     if st.button(etiqueta, key=f"btn_{num}", type="primary" if seleccionado else "secondary"):
                         if seleccionado:
                             pre_reservas.pop(num, None)
@@ -916,6 +1054,7 @@ def main():
         col_mapa, col_form = st.columns([1.5, 1], gap="large")
         with col_mapa:
             st.subheader("🎫 Mapa de Disponibilidad")
+            st.markdown('<div class="ticket-legend">🎟️ Formato tipo ticket: 🟢 disponible, ✅ seleccionado, 🔒 en carrito, 🟠 reservado, 🔴 vendido.</div>', unsafe_allow_html=True)
             renderizar_mapa_interactivo()
         with col_form:
             st.subheader("🧾 Finalizar Compra")
