@@ -189,6 +189,29 @@ CSS_CUSTOM = """
     filter: brightness(1.05) !important;
 }
 
+
+
+/* Boton rojo dinamico para Confirmar y elegir metodo de pago */
+.st-key-btn_confirmar_metodo_pago button {
+    background: linear-gradient(135deg, #DC2626, #7F1D1D) !important;
+    color: #FFFFFF !important;
+    border: 0 !important;
+    border-radius: 14px !important;
+    box-shadow: 0 7px 18px rgba(220, 38, 38, 0.36) !important;
+    font-weight: 900 !important;
+    letter-spacing: 0.25px !important;
+    min-height: 54px !important;
+}
+.st-key-btn_confirmar_metodo_pago button:hover {
+    transform: translateY(-2px) scale(1.012) !important;
+    box-shadow: 0 11px 26px rgba(220, 38, 38, 0.48) !important;
+    filter: brightness(1.07) !important;
+}
+.st-key-btn_confirmar_metodo_pago button:active {
+    transform: translateY(0px) scale(0.99) !important;
+    filter: brightness(0.96) !important;
+}
+
 </style>
 """
 
@@ -1008,33 +1031,50 @@ def renderizar_mapa_interactivo():
     mi_sesion = st.session_state.session_id
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
+
     if not (st.session_state.get("pago_generado_url") or st.session_state.get("stripe_pago_url")):
-        st.session_state.selected_tickets = [t for t in st.session_state.selected_tickets if t in pre_reservas and pre_reservas[t]["session_id"] == mi_sesion]
+        st.session_state.selected_tickets = [
+            t for t in st.session_state.selected_tickets
+            if t in pre_reservas and pre_reservas[t]["session_id"] == mi_sesion
+        ]
+
     conn = st.connection("gsheets", type=GSheetsConnection)
+
     try:
         df_v = conn.read(worksheet="Ventas", ttl=5).dropna(how="all")
         df_r = conn.read(worksheet="Reservas", ttl=5).dropna(how="all")
     except Exception:
         df_v = pd.DataFrame(columns=columnas_ventas())
         df_r = pd.DataFrame(columns=columnas_reservas())
+
     estados_bd = obtener_estado_boletos_bd(df_v, df_r)
     estados_pantalla = {}
-    vendidos, reservados_bd, pre_reservados_otros = 0, 0, 0
+    vendidos = 0
+    reservados_bd = 0
+    pre_reservados_otros = 0
+
     for i in range(TOTAL_BOLETOS):
         num = f"{i:03d}"
+
         if num in estados_bd:
             estados_pantalla[num] = estados_bd[num]
-            vendidos += 1 if estados_bd[num] == "vendido_db" else 0
-            reservados_bd += 1 if estados_bd[num] == "reservado_db" else 0
+            if estados_bd[num] == "vendido_db":
+                vendidos += 1
+            elif estados_bd[num] == "reservado_db":
+                reservados_bd += 1
+
         elif num in pre_reservas:
             if pre_reservas[num]["session_id"] == mi_sesion:
                 estados_pantalla[num] = "pre_reservado_mio"
             else:
                 estados_pantalla[num] = "pre_reservado_otros"
                 pre_reservados_otros += 1
+
         else:
             estados_pantalla[num] = "disponible"
+
     disponibles = TOTAL_BOLETOS - vendidos - reservados_bd - pre_reservados_otros - len(st.session_state.selected_tickets)
+
     st.markdown(f"""
     <div class="metric-container">
         <div class="metric-box m-green"><h2>🟢 {disponibles}</h2><p>Libres</p></div>
@@ -1043,32 +1083,114 @@ def renderizar_mapa_interactivo():
         <div class="metric-box m-red"><h2>🔴 {vendidos}</h2><p>Vendidos</p></div>
     </div>
     """, unsafe_allow_html=True)
+
+    # Estilo dinamico por boleto. Mantiene st.button y la logica original,
+    # pero aplica visual tipo ticket y color de acuerdo con el estado real.
+    estilos_boletos = []
+
+    estilos_base = """
+    <style>
+    div[class*="st-key-btn_"] button {
+        min-height: 58px !important;
+        border-radius: 14px !important;
+        border-style: dashed !important;
+        border-width: 1.8px !important;
+        font-weight: 900 !important;
+        line-height: 1.05 !important;
+        box-shadow: 0 3px 8px rgba(15, 23, 42, 0.14) !important;
+        position: relative !important;
+        overflow: hidden !important;
+    }
+    div[class*="st-key-btn_"] button:hover {
+        transform: translateY(-2px) scale(1.025) !important;
+        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.20) !important;
+    }
+    """
+    estilos_boletos.append(estilos_base)
+
+    for num, estado in estados_pantalla.items():
+        clase = f"st-key-btn_{num}"
+
+        if estado == "vendido_db":
+            fondo = "linear-gradient(145deg, #FECACA, #FEF2F2)"
+            borde = "#EF4444"
+            color = "#7F1D1D"
+        elif estado == "reservado_db":
+            fondo = "linear-gradient(145deg, #FED7AA, #FFF7ED)"
+            borde = "#F59E0B"
+            color = "#7C2D12"
+        elif estado == "pre_reservado_otros":
+            fondo = "linear-gradient(145deg, #E2E8F0, #F8FAFC)"
+            borde = "#64748B"
+            color = "#334155"
+        elif estado == "pre_reservado_mio" or num in st.session_state.selected_tickets:
+            fondo = "linear-gradient(145deg, #BAE6FD, #E0F2FE)"
+            borde = "#0284C7"
+            color = "#0A2540"
+        else:
+            fondo = "linear-gradient(145deg, #D1FAE5, #F0FDF4)"
+            borde = "#10B981"
+            color = "#064E3B"
+
+        estilos_boletos.append(f"""
+        .{clase} button {{
+            background: {fondo} !important;
+            border-color: {borde} !important;
+            color: {color} !important;
+        }}
+        .{clase} button::before,
+        .{clase} button::after {{
+            content: "";
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #FFFFFF;
+            top: 50%;
+            transform: translateY(-50%);
+            box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+        }}
+        .{clase} button::before {{ left: -5px; }}
+        .{clase} button::after {{ right: -5px; }}
+        """)
+
+    estilos_boletos.append("</style>")
+    st.markdown("\n".join(estilos_boletos), unsafe_allow_html=True)
+
     for fila in range(10):
         cols = st.columns(10)
+
         for col_idx in range(10):
             num = f"{(fila * 10 + col_idx):03d}"
             estado = estados_pantalla[num]
+
             with cols[col_idx]:
                 if estado == "vendido_db":
                     st.button(f"🎟️\n🔴 {num}", disabled=True, key=f"btn_{num}", help="Vendido")
+
                 elif estado == "reservado_db":
                     st.button(f"🎟️\n🟠 {num}", disabled=True, key=f"btn_{num}", help="Reservado / validando pago")
+
                 elif estado == "pre_reservado_otros":
                     st.button(f"🎟️\n🔒 {num}", disabled=True, key=f"btn_{num}", help="En carrito de otro usuario")
+
                 else:
                     seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
                     etiqueta = f"🎟️\n✅ {num}" if seleccionado else f"🎟️\n🟢 {num}"
-                    if st.button(etiqueta, key=f"btn_{num}", type="primary" if seleccionado else "secondary"):
+
+                    if st.button(etiqueta, key=f"btn_{num}", type="secondary"):
                         if seleccionado:
                             pre_reservas.pop(num, None)
                             if num in st.session_state.selected_tickets:
                                 st.session_state.selected_tickets.remove(num)
                         else:
-                            pre_reservas[num] = {"session_id": mi_sesion, "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)}
+                            pre_reservas[num] = {
+                                "session_id": mi_sesion,
+                                "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)
+                            }
                             if num not in st.session_state.selected_tickets:
                                 st.session_state.selected_tickets.append(num)
                         st.rerun()
-
 
 def procesar_retorno_pago(conn: GSheetsConnection):
     qp = st.query_params
@@ -1235,7 +1357,7 @@ def main():
                             correo = f"{correo_usuario.replace('@', '').strip()}{dominio}" if correo_usuario else ""
                         telefono = st.text_input("WhatsApp (10 digitos):", max_chars=10)
                         st.write(f"**💰 Total a Pagar:** ${total_pagar:.2f} MXN")
-                        if st.button("✅ Confirmar y Elegir Metodo de Pago", type="primary", use_container_width=True):
+                        if st.button("🔴 Confirmar y Elegir Metodo de Pago", type="primary", use_container_width=True, key="btn_confirmar_metodo_pago"):
                             pre_reservas = obtener_pre_reservas_globales()
                             ahora = datetime.now()
                             siguen_validos = all(t in pre_reservas and pre_reservas[t]["session_id"] == st.session_state.session_id and pre_reservas[t]["expires_at"] > ahora for t in boletos)
