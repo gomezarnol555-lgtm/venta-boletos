@@ -1,4 +1,8 @@
-time import datetime, timedelta
+import os
+import random
+import re
+import uuid
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
@@ -12,7 +16,6 @@ from streamlit_gsheets import GSheetsConnection
 
 import mercadopago
 import stripe
-
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
 TOTAL_BOLETOS = 100
