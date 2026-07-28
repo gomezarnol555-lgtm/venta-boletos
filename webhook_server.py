@@ -1,5 +1,7 @@
 import os
 import json
+import hmac
+import hashlib
 import random
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -12,8 +14,11 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from google.oauth2.service_account import Credentials
 
-app = FastAPI(title="Webhook Pagos Rifa", version="1.0.0")
+app = FastAPI(title="Webhook Pagos Rifa", version="2.0.0")
 
+# ============================================================
+# CONFIGURACION POR VARIABLES DE ENTORNO
+# ============================================================
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "").strip()
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
@@ -22,12 +27,16 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 
 MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "").strip()
+MP_WEBHOOK_SECRET = os.getenv("MP_WEBHOOK_SECRET", "").strip()
+
 DEFAULT_EVENTO = os.getenv("DEFAULT_EVENTO", "Rifa de Celular").strip()
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
-
+# ============================================================
+# COLUMNAS
+# ============================================================
 def columnas_reservas() -> list:
     return [
         "External_Reference",
@@ -68,7 +77,9 @@ def columnas_ventas() -> list:
         "Proveedor_Pago",
     ]
 
-
+# ============================================================
+# UTILIDADES GENERALES
+# ============================================================
 def ahora_txt() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -128,7 +139,9 @@ def asegurar_columnas(df: pd.DataFrame, columnas: list) -> pd.DataFrame:
             df[col] = df[col].apply(limpiar_valor)
     return df
 
-
+# ============================================================
+# GOOGLE SHEETS
+# ============================================================
 def cliente_gspread():
     if not SPREADSHEET_ID:
         raise RuntimeError("Falta SPREADSHEET_ID")
@@ -160,6 +173,7 @@ def leer_worksheet(nombre: str, columnas: list) -> pd.DataFrame:
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=nombre, rows=1000, cols=len(columnas))
         ws.update([columnas])
+
     registros = ws.get_all_records()
     df = pd.DataFrame(registros)
     if df.empty:
@@ -173,6 +187,7 @@ def escribir_worksheet(nombre: str, df: pd.DataFrame, columnas: list) -> None:
         ws = sh.worksheet(nombre)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=nombre, rows=1000, cols=len(columnas))
+
     df = asegurar_columnas(df, columnas)
     valores = [columnas] + df.astype("object").where(pd.notna(df), "").values.tolist()
     ws.clear()
@@ -194,7 +209,87 @@ def escribir_reservas(df: pd.DataFrame) -> None:
 def escribir_ventas(df: pd.DataFrame) -> None:
     escribir_worksheet("Ventas", df, columnas_ventas())
 
+# ============================================================
+# FIRMA DE MERCADO PAGO
+# ============================================================
+def parsear_header_x_signature(x_signature: str) -> Dict[str, str]:
+    partes = {}
+    for parte in str(x_signature or "").split(","):
+        if "=" in parte:
+            k, v = parte.split("=", 1)
+            partes[k.strip()] = v.strip()
+    return partes
 
+
+def normalizar_mp_data_id(data_id: str) -> str:
+    data_id = limpiar_valor(data_id)
+    if data_id and any(c.isalpha() for c in data_id):
+        return data_id.lower()
+    return data_id
+
+
+def construir_manifest_mp(data_id: str, x_request_id: str, ts: str) -> str:
+    manifest = ""
+    data_id = normalizar_mp_data_id(data_id)
+    x_request_id = limpiar_valor(x_request_id)
+    ts = limpiar_valor(ts)
+
+    if data_id:
+        manifest += f"id:{data_id};"
+    if x_request_id:
+        manifest += f"request-id:{x_request_id};"
+    if ts:
+        manifest += f"ts:{ts};"
+    return manifest
+
+
+def extraer_data_id_mp(payload: Dict[str, Any], request: Request) -> str:
+    data = payload.get("data") or {}
+    opciones = [
+        request.query_params.get("data.id", ""),
+        request.query_params.get("id", ""),
+        request.query_params.get("data_id", ""),
+        data.get("id", "") if isinstance(data, dict) else "",
+        payload.get("id", ""),
+    ]
+    for opcion in opciones:
+        opcion = limpiar_valor(opcion)
+        if opcion:
+            return opcion
+    return ""
+
+
+def validar_firma_mercadopago(payload: Dict[str, Any], request: Request) -> None:
+    if not MP_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="MP_WEBHOOK_SECRET no configurado en Render")
+
+    x_signature = request.headers.get("x-signature", "")
+    x_request_id = request.headers.get("x-request-id", "")
+
+    if not x_signature or not x_request_id:
+        raise HTTPException(status_code=401, detail="Firma Mercado Pago ausente")
+
+    partes = parsear_header_x_signature(x_signature)
+    ts = partes.get("ts", "")
+    firma_recibida = partes.get("v1", "")
+
+    if not ts or not firma_recibida:
+        raise HTTPException(status_code=401, detail="Firma Mercado Pago invalida")
+
+    data_id = extraer_data_id_mp(payload, request)
+    manifest = construir_manifest_mp(data_id, x_request_id, ts)
+    firma_calculada = hmac.new(
+        MP_WEBHOOK_SECRET.encode("utf-8"),
+        manifest.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(firma_calculada, firma_recibida):
+        raise HTTPException(status_code=401, detail="Firma Mercado Pago no coincide")
+
+# ============================================================
+# ACTUALIZACION CENTRAL DE PAGO
+# ============================================================
 def registrar_pago_confirmado(payment_info: Dict[str, Any]) -> List[Dict[str, Any]]:
     ext_ref = limpiar_valor(payment_info.get("external_reference", ""))
     pago_id = limpiar_valor(payment_info.get("id", ""))
@@ -260,15 +355,19 @@ def registrar_pago_confirmado(payment_info: Dict[str, Any]) -> List[Dict[str, An
     escribir_ventas(df_final)
     return nuevas_ventas
 
-
+# ============================================================
+# STRIPE
+# ============================================================
 def payment_info_desde_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
     session_dict = safe_to_dict(session)
     if str(safe_get(session_dict, "payment_status", "")).lower() != "paid":
         return None
+
     metadata = safe_get(session_dict, "metadata", {}) or {}
     payment_intent = safe_get(session_dict, "payment_intent", "")
     if not isinstance(payment_intent, str):
         payment_intent = safe_get(payment_intent, "id", "")
+
     return {
         "id": limpiar_valor(payment_intent),
         "external_reference": limpiar_valor(metadata.get("external_reference") or safe_get(session_dict, "client_reference_id", "")),
@@ -282,6 +381,7 @@ def payment_info_desde_payment_intent(intent: Any) -> Optional[Dict[str, Any]]:
     intent_dict = safe_to_dict(intent)
     if str(safe_get(intent_dict, "status", "")).lower() != "succeeded":
         return None
+
     metadata = safe_get(intent_dict, "metadata", {}) or {}
     return {
         "id": limpiar_valor(safe_get(intent_dict, "id", "")),
@@ -294,14 +394,14 @@ def payment_info_desde_payment_intent(intent: Any) -> Optional[Dict[str, Any]]:
 
 @app.post("/webhook/stripe")
 async def webhook_stripe(request: Request):
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET no configurado en Render")
+
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
     try:
-        if STRIPE_WEBHOOK_SECRET:
-            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-        else:
-            event = json.loads(payload.decode("utf-8"))
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Webhook Stripe invalido: {e}")
 
@@ -323,28 +423,23 @@ async def webhook_stripe(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error procesando Stripe: {e}")
 
-
+# ============================================================
+# MERCADO PAGO
+# ============================================================
 def obtener_payment_id_mp(payload: Dict[str, Any], request: Request) -> str:
-    payment_id = ""
-    data = payload.get("data") or {}
-    if isinstance(data, dict):
-        payment_id = limpiar_valor(data.get("id", ""))
-    if not payment_id:
-        payment_id = limpiar_valor(payload.get("id", ""))
-    if not payment_id:
-        payment_id = limpiar_valor(request.query_params.get("id", ""))
-    if not payment_id:
-        payment_id = limpiar_valor(request.query_params.get("data.id", ""))
-    return payment_id
+    return extraer_data_id_mp(payload, request)
 
 
 def consultar_pago_mp(payment_id: str) -> Optional[Dict[str, Any]]:
     if not MP_ACCESS_TOKEN:
         raise RuntimeError("Falta MP_ACCESS_TOKEN")
+
     url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
     resp = requests.get(url, headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}, timeout=20)
+
     if resp.status_code >= 400:
         raise RuntimeError(f"Mercado Pago API error {resp.status_code}: {resp.text[:300]}")
+
     pago = resp.json()
     if pago.get("status") != "approved":
         return None
@@ -370,6 +465,8 @@ async def webhook_mercadopago(request: Request):
     except Exception:
         payload = {}
 
+    validar_firma_mercadopago(payload, request)
+
     payment_id = obtener_payment_id_mp(payload, request)
     topic = limpiar_valor(payload.get("type") or payload.get("topic") or request.query_params.get("topic", ""))
 
@@ -382,17 +479,21 @@ async def webhook_mercadopago(request: Request):
     try:
         pago = consultar_pago_mp(payment_id)
         payment_info = payment_info_desde_mp(pago) if pago else None
+
         if payment_info and payment_info.get("external_reference"):
             ventas = registrar_pago_confirmado(payment_info)
             return JSONResponse({"ok": True, "provider": "MERCADO_PAGO", "ventas": len(ventas)})
+
         return JSONResponse({"ok": True, "ignored": True, "payment_id": payment_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error procesando Mercado Pago: {e}")
 
-
+# ============================================================
+# HEALTHCHECK
+# ============================================================
 @app.get("/")
 def root():
-    return {"ok": True, "service": "webhook-pagos-rifa"}
+    return {"ok": True, "service": "webhook-pagos-rifa-seguro"}
 
 
 @app.get("/health")
@@ -401,5 +502,7 @@ def health():
         "ok": True,
         "spreadsheet_configurado": bool(SPREADSHEET_ID),
         "stripe_configurado": bool(STRIPE_SECRET_KEY),
+        "stripe_webhook_secret_configurado": bool(STRIPE_WEBHOOK_SECRET),
         "mp_configurado": bool(MP_ACCESS_TOKEN),
+        "mp_webhook_secret_configurado": bool(MP_WEBHOOK_SECRET),
     }
