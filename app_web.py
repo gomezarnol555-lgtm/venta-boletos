@@ -81,15 +81,6 @@ CSS_CUSTOM = """
 .m-yellow { border-color: #F59E0B; }
 .m-red { border-color: #EF4444; }
 .small-help {color:#64748B; font-size: 0.9rem;}
-.ticket-legend {
-    margin: 6px 0 16px 0;
-    padding: 10px 12px;
-    border-radius: 12px;
-    background: #F8FAFC;
-    border: 1px solid #E2E8F0;
-    color: #334155;
-    font-size: 0.92rem;
-}
 
 
 /* Mapa tipo ticket con colores por estado */
@@ -118,18 +109,9 @@ CSS_CUSTOM = """
 }
 .ticket-card::before,
 .ticket-card::after {
-    content: "";
-    position: absolute;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: #FFFFFF;
-    top: 50%;
-    transform: translateY(-50%);
-    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+    content: none !important;
+    display: none !important;
 }
-.ticket-card::before { left: -5px; }
-.ticket-card::after { right: -5px; }
 .ticket-card:hover {
     transform: translateY(-2px) scale(1.025);
     box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
@@ -1140,18 +1122,9 @@ def renderizar_mapa_interactivo():
         }}
         .{clase} button::before,
         .{clase} button::after {{
-            content: "";
-            position: absolute;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: #FFFFFF;
-            top: 50%;
-            transform: translateY(-50%);
-            box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+            content: none !important;
+            display: none !important;
         }}
-        .{clase} button::before {{ left: -5px; }}
-        .{clase} button::after {{ right: -5px; }}
         """)
 
     estilos_boletos.append("</style>")
@@ -1307,7 +1280,6 @@ def main():
         col_mapa, col_form = st.columns([1.5, 1], gap="large")
         with col_mapa:
             st.subheader("🎫 Mapa de Disponibilidad")
-            st.markdown('<div class="ticket-legend">🎟️ Vista tipo ticket: 🟢 disponible en verde, ✅ seleccionado, 🔒 en carrito bloqueado, 🟠 reservado en amarillo/naranja y 🔴 vendido en rojo.</div>', unsafe_allow_html=True)
             renderizar_mapa_interactivo()
         with col_form:
             st.subheader("🧾 Finalizar Compra")
