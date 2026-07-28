@@ -694,17 +694,7 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     story.append(detalle)
     story.append(Spacer(1, 24))
 
-    nota = Table(
-        [[Paragraph("Documento generado automaticamente. No incluye claves ni referencias de pago sensibles.", estilo_nota)]],
-        colWidths=[500]
-    )
-    nota.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
-        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#CBD5E1")),
-        ("TOPPADDING", (0, 0), (-1, -1), 9),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
-    ]))
-    story.append(nota)
+
 
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
@@ -1139,17 +1129,17 @@ def renderizar_mapa_interactivo():
 
             with cols[col_idx]:
                 if estado == "vendido_db":
-                    st.button(f"🎟️\n🔴 {num}", disabled=True, key=f"btn_{num}", help="Vendido")
+                    st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Vendido")
 
                 elif estado == "reservado_db":
-                    st.button(f"🎟️\n🟠 {num}", disabled=True, key=f"btn_{num}", help="Reservado / validando pago")
+                    st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Reservado / validando pago")
 
                 elif estado == "pre_reservado_otros":
-                    st.button(f"🎟️\n🔒 {num}", disabled=True, key=f"btn_{num}", help="En carrito de otro usuario")
+                    st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="En carrito de otro usuario")
 
                 else:
                     seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
-                    etiqueta = f"🎟️\n✅ {num}" if seleccionado else f"🎟️\n🟢 {num}"
+                    etiqueta = f"🎟️\n{num}"
 
                     if st.button(etiqueta, key=f"btn_{num}", type="secondary"):
                         if seleccionado:
