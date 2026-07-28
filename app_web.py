@@ -90,6 +90,105 @@ CSS_CUSTOM = """
     color: #334155;
     font-size: 0.92rem;
 }
+
+
+/* Mapa tipo ticket con colores por estado */
+.ticket-grid {
+    display: grid;
+    grid-template-columns: repeat(10, minmax(54px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+}
+.ticket-card {
+    min-height: 54px;
+    border-radius: 12px;
+    border: 1.8px dashed #94A3B8;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-decoration: none !important;
+    font-weight: 900;
+    font-size: 13px;
+    letter-spacing: 0.2px;
+    box-shadow: 0 3px 8px rgba(15, 23, 42, 0.12);
+    transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease;
+    position: relative;
+    overflow: hidden;
+}
+.ticket-card::before,
+.ticket-card::after {
+    content: "";
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #FFFFFF;
+    top: 50%;
+    transform: translateY(-50%);
+    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+.ticket-card::before { left: -5px; }
+.ticket-card::after { right: -5px; }
+.ticket-card:hover {
+    transform: translateY(-2px) scale(1.025);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
+    filter: brightness(1.02);
+}
+.ticket-icon { font-size: 16px; line-height: 17px; }
+.ticket-num { font-size: 13px; line-height: 14px; }
+.ticket-disponible {
+    color: #064E3B !important;
+    background: linear-gradient(145deg, #D1FAE5, #F0FDF4);
+    border-color: #10B981;
+}
+.ticket-seleccionado {
+    color: #0A2540 !important;
+    background: linear-gradient(145deg, #BAE6FD, #E0F2FE);
+    border-color: #0284C7;
+}
+.ticket-vendido {
+    color: #7F1D1D !important;
+    background: linear-gradient(145deg, #FECACA, #FEF2F2);
+    border-color: #EF4444;
+    cursor: not-allowed;
+}
+.ticket-reservado {
+    color: #7C2D12 !important;
+    background: linear-gradient(145deg, #FED7AA, #FFF7ED);
+    border-color: #F59E0B;
+    cursor: not-allowed;
+}
+.ticket-carrito {
+    color: #334155 !important;
+    background: linear-gradient(145deg, #E2E8F0, #F8FAFC);
+    border-color: #64748B;
+    cursor: not-allowed;
+}
+@media (max-width: 900px) {
+    .ticket-grid { grid-template-columns: repeat(5, minmax(52px, 1fr)); }
+}
+@media (max-width: 520px) {
+    .ticket-grid { grid-template-columns: repeat(4, minmax(50px, 1fr)); gap: 6px; }
+    .ticket-card { min-height: 50px; font-size: 12px; }
+}
+
+/* Boton rojo dinamico para Verificar Pago y Descargar PDF */
+.st-key-btn_verificar_pago_pdf button {
+    background: linear-gradient(135deg, #DC2626, #991B1B) !important;
+    color: white !important;
+    border: 0 !important;
+    border-radius: 12px !important;
+    box-shadow: 0 6px 16px rgba(220, 38, 38, 0.35) !important;
+    font-weight: 900 !important;
+    letter-spacing: 0.2px !important;
+}
+.st-key-btn_verificar_pago_pdf button:hover {
+    transform: translateY(-2px) scale(1.01) !important;
+    box-shadow: 0 10px 24px rgba(220, 38, 38, 0.45) !important;
+    filter: brightness(1.05) !important;
+}
+
 </style>
 """
 
@@ -422,14 +521,12 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
 def dibujar_fondo_autenticidad(canvas, doc):
     width, height = doc.pagesize
     canvas.saveState()
-
-    # Fondo general
     canvas.setFillColor(colors.HexColor("#F8FAFC"))
     canvas.rect(0, 0, width, height, fill=1, stroke=0)
 
-    # Marca de agua diagonal de autenticidad
+    # Marca de agua de autenticidad
     canvas.setFillColor(colors.Color(0.10, 0.18, 0.30, alpha=0.045))
-    canvas.setFont("Helvetica-Bold", 44)
+    canvas.setFont("Helvetica-Bold", 42)
     canvas.translate(width / 2, height / 2)
     canvas.rotate(32)
     for y in range(-360, 420, 95):
@@ -437,29 +534,28 @@ def dibujar_fondo_autenticidad(canvas, doc):
     canvas.rotate(-32)
     canvas.translate(-width / 2, -height / 2)
 
-    # Marco exterior
+    # Marco tipo ticket
     canvas.setStrokeColor(colors.HexColor("#0A2540"))
-    canvas.setLineWidth(1.1)
+    canvas.setLineWidth(1.15)
     canvas.roundRect(24, 24, width - 48, height - 48, 16, fill=0, stroke=1)
 
-    # Banda superior e inferior
+    # Bandas de seguridad
     canvas.setFillColor(colors.HexColor("#0A2540"))
     canvas.roundRect(42, height - 112, width - 84, 48, 10, fill=1, stroke=0)
     canvas.roundRect(42, 58, width - 84, 26, 8, fill=1, stroke=0)
 
-    # Perforaciones laterales estilo ticket
+    # Perforaciones laterales
     canvas.setFillColor(colors.HexColor("#F8FAFC"))
     for y in range(130, int(height - 135), 26):
         canvas.circle(42, y, 6, fill=1, stroke=0)
         canvas.circle(width - 42, y, 6, fill=1, stroke=0)
 
-    # Lineas punteadas internas
+    # Lineas punteadas
     canvas.setStrokeColor(colors.HexColor("#CBD5E1"))
     canvas.setDash(3, 4)
     canvas.line(62, 118, width - 62, 118)
     canvas.line(62, height - 130, width - 62, height - 130)
     canvas.setDash()
-
     canvas.restoreState()
 
 def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
@@ -469,8 +565,8 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     doc = SimpleDocTemplate(
         nombre_archivo,
         pagesize=letter,
-        rightMargin=48,
-        leftMargin=48,
+        rightMargin=46,
+        leftMargin=46,
         topMargin=70,
         bottomMargin=50
     )
@@ -487,7 +583,6 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         alignment=1,
         spaceAfter=0
     )
-
     estilo_subtitulo = ParagraphStyle(
         "Subtitulo",
         parent=styles["Normal"],
@@ -496,35 +591,37 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         textColor=colors.HexColor("#E2E8F0"),
         alignment=1
     )
-
-    estilo_boleto_label = ParagraphStyle(
-        "BoletoLabel",
+    estilo_celda = ParagraphStyle(
+        "CeldaTicket",
         parent=styles["Normal"],
-        fontSize=17,
-        leading=20,
-        textColor=colors.HexColor("#334155"),
-        alignment=1
+        fontSize=10.5,
+        leading=13,
+        textColor=colors.HexColor("#334155")
     )
-
+    estilo_celda_bold = ParagraphStyle(
+        "CeldaTicketBold",
+        parent=styles["Normal"],
+        fontSize=10.5,
+        leading=13,
+        textColor=colors.HexColor("#0A2540")
+    )
     estilo_boleto_numero = ParagraphStyle(
         "BoletoNumero",
         parent=styles["Heading1"],
-        fontSize=32,
-        leading=38,
+        fontSize=24,
+        leading=30,
         textColor=colors.HexColor("#0A2540"),
         alignment=1
     )
-
     estilo_nota = ParagraphStyle(
         "NotaTicket",
         parent=styles["Normal"],
-        fontSize=9,
+        fontSize=8.8,
         leading=11,
         textColor=colors.HexColor("#64748B"),
         alignment=1
     )
 
-    # Encabezado tipo ticket
     encabezado = Table(
         [[Paragraph("BOLETO OFICIAL", estilo_titulo_blanco)],
          [Paragraph("Comprobante de boletos registrados", estilo_subtitulo)]],
@@ -532,31 +629,65 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     )
     encabezado.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
-        ("BOX", (0, 0), (-1, -1), 0, colors.HexColor("#0A2540")),
         ("TOPPADDING", (0, 0), (-1, -1), 8),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
     ]))
     story.append(encabezado)
-    story.append(Spacer(1, 52))
+    story.append(Spacer(1, 30))
 
-    # Cuerpo tipo ticket: solo Boleto + numeros, sin IDs sensibles
-    cuerpo = Table(
-        [[Paragraph("Boleto:", estilo_boleto_label)],
+    # Resumen de boletos en formato visible
+    resumen = Table(
+        [[Paragraph("No. de Boleto", estilo_celda_bold)],
          [Paragraph(boletos_txt, estilo_boleto_numero)]],
         colWidths=[500]
     )
-    cuerpo.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFFFFF")),
-        ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor("#0A2540")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
-        ("TOPPADDING", (0, 0), (-1, -1), 18),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 18),
+    resumen.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
+        ("BACKGROUND", (0, 1), (-1, 1), colors.white),
+        ("BOX", (0, 0), (-1, -1), 1.1, colors.HexColor("#0A2540")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
     ]))
-    story.append(cuerpo)
-    story.append(Spacer(1, 42))
+    story.append(resumen)
+    story.append(Spacer(1, 22))
+
+    filas = []
+    for boleto in datos_boletos:
+        fecha_compra = str(boleto.get("Fecha_Compra", "") or "")
+        if fecha_compra:
+            fecha_compra = fecha_compra.split(" ")[0]
+        else:
+            fecha_compra = datetime.now().strftime("%Y-%m-%d")
+        try:
+            precio_float = float(boleto.get("Precio", 0) or 0)
+            precio_txt = f"${precio_float:.2f} {MP_CURRENCY_ID}"
+        except Exception:
+            precio_txt = str(boleto.get("Precio", ""))
+        filas.extend([
+            [Paragraph("<b>ID de Boleto:</b>", estilo_celda_bold), Paragraph(str(boleto.get("ID_Boleto", "")), estilo_celda)],
+            [Paragraph("<b>Nombre:</b>", estilo_celda_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
+            [Paragraph("<b>No. de Boleto:</b>", estilo_celda_bold), Paragraph(parse_ticket_number(boleto.get("Numero_Boleto", "")), estilo_celda)],
+            [Paragraph("<b>Precio Pagado:</b>", estilo_celda_bold), Paragraph(precio_txt, estilo_celda)],
+            [Paragraph("<b>Metodo de Pago:</b>", estilo_celda_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)],
+            [Paragraph("<b>Fecha:</b>", estilo_celda_bold), Paragraph(fecha_compra, estilo_celda)],
+        ])
+        if len(datos_boletos) > 1:
+            filas.append([Paragraph("", estilo_celda), Paragraph("", estilo_celda)])
+
+    detalle = Table(filas, colWidths=[160, 340])
+    detalle.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#0A2540")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(detalle)
+    story.append(Spacer(1, 24))
 
     nota = Table(
         [[Paragraph("Documento generado automaticamente. No incluye claves ni referencias de pago sensibles.", estilo_nota)]],
@@ -565,8 +696,8 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     nota.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
         ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#CBD5E1")),
-        ("TOPPADDING", (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
     ]))
     story.append(nota)
 
@@ -1026,7 +1157,7 @@ def main():
             buscar_num = st.text_input("Numero de boleto (ej. 005):")
         with c2:
             buscar_correo = st.text_input("Correo asociado:")
-        if st.button("🔎 Verificar Pago y Descargar PDF", type="primary"):
+        if st.button("🔴 Verificar Pago y Descargar PDF", type="primary", key="btn_verificar_pago_pdf"):
             if not buscar_num or not buscar_correo:
                 st.warning("Ingresa boleto y correo.")
             else:
@@ -1054,7 +1185,7 @@ def main():
         col_mapa, col_form = st.columns([1.5, 1], gap="large")
         with col_mapa:
             st.subheader("🎫 Mapa de Disponibilidad")
-            st.markdown('<div class="ticket-legend">🎟️ Formato tipo ticket: 🟢 disponible, ✅ seleccionado, 🔒 en carrito, 🟠 reservado, 🔴 vendido.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="ticket-legend">🎟️ Vista tipo ticket: 🟢 disponible en verde, ✅ seleccionado, 🔒 en carrito bloqueado, 🟠 reservado en amarillo/naranja y 🔴 vendido en rojo.</div>', unsafe_allow_html=True)
             renderizar_mapa_interactivo()
         with col_form:
             st.subheader("🧾 Finalizar Compra")
