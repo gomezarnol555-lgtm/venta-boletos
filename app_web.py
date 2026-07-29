@@ -1,17 +1,10 @@
-import os
-import random
-import re
-import uuid
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
-import pandas as pd
-import streamlit as st
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.graphics.barcode import qr
+from reportlab.graphics.shapes import Drawing
 from streamlit_gsheets import GSheetsConnection
 
 import mercadopago
@@ -19,8 +12,36 @@ import stripe
 
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
+
+# ============================================================
+# CONFIGURACION GENERAL DE LA RIFA
+# Cambia solamente estas dos variables. El mapa, los digitos,
+# el precio, Mercado Pago, Stripe, Sheets y PDF se adaptan.
+# Ejemplos:
+# TOTAL_BOLETOS = 100  -> boletos 00 a 99
+# TOTAL_BOLETOS = 1000 -> boletos 000 a 999
+# ============================================================
 TOTAL_BOLETOS = 100
 PRECIO_BOLETO = 15.00
+
+# Variables impresas en el boleto PDF
+NOMBRE_EVENTO = "Gran Rifa"
+FECHA_VIGENCIA_BOLETO = "31/12/2026"
+MENSAJE_GENERAL_BOLETO = (
+    "Este documento acredita la participacion del boleto indicado en el evento. "
+    "La vigencia aplica hasta la fecha señalada y el boleto debe conservarse como comprobante. "
+    "La validez del boleto queda sujeta a que el pago se encuentre confirmado en el sistema."
+)
+
+DIGITOS_BOLETO = max(1, len(str(max(int(TOTAL_BOLETOS) - 1, 0))))
+COLUMNAS_MAPA = max(1, math.ceil(math.sqrt(max(int(TOTAL_BOLETOS), 1))))
+
+
+def formatear_numero_boleto(valor: Any) -> str:
+    try:
+        return f"{int(float(valor)):0{DIGITOS_BOLETO}d}"
+    except Exception:
+        return str(valor).strip().zfill(DIGITOS_BOLETO)
 
 
 def obtener_config(nombre: str, default: str = "") -> str:
@@ -85,8 +106,6 @@ CSS_CUSTOM = """
 .m-gray { border-color: #94A3B8; }
 .m-yellow { border-color: #F59E0B; }
 .m-red { border-color: #EF4444; }
-
-/* Botones rojos dinamicos */
 .st-key-btn_confirmar_metodo_pago button,
 .st-key-btn_verificar_pago_pdf button {
     background: linear-gradient(135deg, #DC2626, #7F1D1D) !important;
@@ -104,37 +123,9 @@ CSS_CUSTOM = """
     box-shadow: 0 11px 26px rgba(220, 38, 38, 0.48) !important;
     filter: brightness(1.07) !important;
 }
-
-/* Movil */
-@media (max-width: 900px) {
-    [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; gap: 0.35rem !important; }
-    [data-testid="column"] { min-width: 18% !important; flex: 1 1 18% !important; }
-    div[class*="st-key-btn_"] button {
-        min-height: 54px !important; font-size: 12px !important; border-radius: 12px !important;
-        line-height: 1.0 !important; padding: 2px 1px !important;
-    }
-    .metric-container { display: grid !important; grid-template-columns: repeat(2, minmax(120px, 1fr)) !important; gap: 8px !important; }
-}
-@media (max-width: 540px) {
-    [data-testid="column"] { min-width: 23% !important; flex: 1 1 23% !important; padding-left: 2px !important; padding-right: 2px !important; }
-    div[class*="st-key-btn_"] button { min-height: 50px !important; font-size: 11.5px !important; border-width: 1.4px !important; }
-    .metric-container { grid-template-columns: repeat(2, minmax(110px, 1fr)) !important; }
-    .metric-box h2 { font-size: 17px !important; }
-    .metric-box p { font-size: 11px !important; }
-}
-@media (max-width: 390px) {
-    [data-testid="column"] { min-width: 30% !important; flex: 1 1 30% !important; }
-    div[class*="st-key-btn_"] button { min-height: 48px !important; font-size: 11px !important; }
-}
-
-
-/* ============================================================
-   MAPA CUADRADO RESPONSIVO EN MOVIL
-   Mantiene los botones Streamlit y solo ajusta distribucion visual.
-   ============================================================ */
 .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] {
     display: grid !important;
-    grid-template-columns: repeat(10, minmax(44px, 1fr)) !important;
+    grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(44px, 1fr)) !important;
     gap: 7px !important;
     align-items: stretch !important;
 }
@@ -152,33 +143,20 @@ CSS_CUSTOM = """
     white-space: pre-line !important;
 }
 @media (max-width: 900px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] {
-        grid-template-columns: repeat(5, minmax(54px, 1fr)) !important;
-        gap: 8px !important;
-    }
-    .st-key-mapa_boletos_grid [data-testid="stButton"] button {
-        min-height: 56px !important;
-        font-size: 12px !important;
-    }
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat(5, minmax(54px, 1fr)) !important; gap: 8px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height: 56px !important; font-size: 12px !important; }
+    .metric-container { display: grid !important; grid-template-columns: repeat(2, minmax(120px, 1fr)) !important; gap: 8px !important; }
 }
 @media (max-width: 540px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] {
-        grid-template-columns: repeat(5, minmax(50px, 1fr)) !important;
-        gap: 6px !important;
-    }
-    .st-key-mapa_boletos_grid [data-testid="stButton"] button {
-        min-height: 52px !important;
-        font-size: 11.5px !important;
-        padding: 1px !important;
-    }
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat(5, minmax(50px, 1fr)) !important; gap: 6px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height: 52px !important; font-size: 11.5px !important; padding: 1px !important; }
+    .metric-container { grid-template-columns: repeat(2, minmax(110px, 1fr)) !important; }
+    .metric-box h2 { font-size: 17px !important; }
+    .metric-box p { font-size: 11px !important; }
 }
 @media (max-width: 390px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] {
-        grid-template-columns: repeat(4, minmax(48px, 1fr)) !important;
-        gap: 6px !important;
-    }
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat(4, minmax(48px, 1fr)) !important; gap: 6px !important; }
 }
-
 </style>
 """
 
@@ -256,10 +234,7 @@ def safe_data_list(obj: Any) -> list:
 def parse_ticket_number(valor: Any) -> str:
     if pd.isna(valor) or str(valor).strip() == "":
         return ""
-    try:
-        return f"{int(float(valor)):03d}"
-    except Exception:
-        return str(valor).strip().zfill(3)
+    return formatear_numero_boleto(valor)
 
 
 def limpiar_valor_id(valor: Any) -> str:
@@ -284,6 +259,30 @@ def texto_boletos(datos_boletos: List[Dict[str, Any]]) -> str:
         if numero and numero not in numeros:
             numeros.append(numero)
     return ", ".join(numeros)
+
+
+def crear_qr_boleto(datos_boletos: List[Dict[str, Any]]) -> Drawing:
+    boletos_txt = texto_boletos(datos_boletos) or "N/A"
+    nombre_cliente = ""
+    if datos_boletos:
+        nombre_cliente = str(datos_boletos[0].get("Nombre", ""))
+
+    contenido_qr = (
+        f"Evento: {NOMBRE_EVENTO}\n"
+        f"Boleto(s): {boletos_txt}\n"
+        f"Cliente: {nombre_cliente}\n"
+        f"Vigencia: {FECHA_VIGENCIA_BOLETO}"
+    )
+
+    qr_widget = qr.QrCodeWidget(contenido_qr)
+    bounds = qr_widget.getBounds()
+    ancho = bounds[2] - bounds[0]
+    alto = bounds[3] - bounds[1]
+    escala = 86 / max(ancho, alto)
+
+    dibujo = Drawing(92, 92, transform=[escala, 0, 0, escala, 3, 3])
+    dibujo.add(qr_widget)
+    return dibujo
 
 
 def mostrar_diagnostico_pagos():
@@ -516,33 +515,105 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=46, leftMargin=46, topMargin=70, bottomMargin=50)
     story = []
     styles = getSampleStyleSheet()
+
     estilo_titulo = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.white, alignment=1)
     estilo_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=9.5, textColor=colors.HexColor("#E2E8F0"), alignment=1)
     estilo_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#334155"))
     estilo_bold = ParagraphStyle("Bold", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#0A2540"))
     estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=24, leading=30, textColor=colors.HexColor("#0A2540"), alignment=1)
+    estilo_evento = ParagraphStyle("Evento", parent=styles["Heading2"], fontSize=13, leading=16, textColor=colors.HexColor("#0A2540"), alignment=1)
+    estilo_mensaje = ParagraphStyle("Mensaje", parent=styles["Normal"], fontSize=8.7, leading=11, textColor=colors.HexColor("#475569"), alignment=1)
 
-    encabezado = Table([[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph("Comprobante de boletos registrados", estilo_sub)]], colWidths=[500])
-    encabezado.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+    encabezado = Table(
+        [
+            [Paragraph("BOLETO OFICIAL", estilo_titulo)],
+            [Paragraph(str(NOMBRE_EVENTO), estilo_sub)],
+        ],
+        colWidths=[500]
+    )
+    encabezado.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+    ]))
     story.append(encabezado)
-    story.append(Spacer(1, 30))
-
-    resumen = Table([[Paragraph("No. de Boleto", estilo_bold)], [Paragraph(boletos_txt, estilo_num)]], colWidths=[500])
-    resumen.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")), ("BACKGROUND", (0, 1), (-1, 1), colors.white), ("BOX", (0, 0), (-1, -1), 1.1, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 12), ("BOTTOMPADDING", (0, 0), (-1, -1), 12)]))
-    story.append(resumen)
     story.append(Spacer(1, 22))
+
+    resumen_izquierdo = Table(
+        [
+            [Paragraph("Nombre del evento", estilo_bold)],
+            [Paragraph(str(NOMBRE_EVENTO), estilo_evento)],
+            [Paragraph("No. de Boleto", estilo_bold)],
+            [Paragraph(boletos_txt, estilo_num)],
+            [Paragraph("Fecha de vigencia", estilo_bold)],
+            [Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
+        ],
+        colWidths=[345]
+    )
+    resumen_izquierdo.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
+        ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")),
+        ("BACKGROUND", (0, 4), (-1, 4), colors.HexColor("#E0F2FE")),
+        ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#0A2540")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+
+    qr_box = Table(
+        [
+            [crear_qr_boleto(datos_boletos)],
+            [Paragraph("Codigo QR de validacion", estilo_mensaje)],
+        ],
+        colWidths=[135]
+    )
+    qr_box.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#0A2540")),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+
+    resumen = Table([[resumen_izquierdo, qr_box]], colWidths=[355, 145])
+    resumen.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(resumen)
+    story.append(Spacer(1, 18))
+
+    mensaje = Table(
+        [[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]],
+        colWidths=[500]
+    )
+    mensaje.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+        ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#CBD5E1")),
+        ("TOPPADDING", (0, 0), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+    ]))
+    story.append(mensaje)
+    story.append(Spacer(1, 18))
 
     filas = []
     for boleto in datos_boletos:
+        numero_boleto = parse_ticket_number(boleto.get("Numero_Boleto", ""))
+        id_boleto_pdf = f"Bol-{numero_boleto}"
         fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0] or datetime.now().strftime("%Y-%m-%d")
         try:
             precio_txt = f"${float(boleto.get('Precio', 0) or 0):.2f} {MP_CURRENCY_ID}"
         except Exception:
             precio_txt = str(boleto.get("Precio", ""))
+
         filas.extend([
-            [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(str(boleto.get("ID_Boleto", "")), estilo_celda)],
+            [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(id_boleto_pdf, estilo_celda)],
             [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
-            [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(parse_ticket_number(boleto.get("Numero_Boleto", "")), estilo_celda)],
+            [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)],
             [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)],
             [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)],
             [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)],
@@ -551,7 +622,14 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
             filas.append([Paragraph("", estilo_celda), Paragraph("", estilo_celda)])
 
     detalle = Table(filas, colWidths=[160, 340])
-    detalle.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+    detalle.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#0A2540")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
     story.append(detalle)
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
@@ -577,10 +655,7 @@ def construir_pago_stripe_desde_session(session: Any, external_reference_reserva
     customer_details = safe_get(session_dict, "customer_details", {}) or {}
     correo_stripe = str(safe_get(session_dict, "customer_email", "") or safe_get(customer_details, "email", "") or "").strip().lower()
     correo_reserva = str(correo_reserva or "").strip().lower()
-    if monto_esperado is not None:
-        monto_ok = int(safe_get(session_dict, "amount_total", 0) or 0) == int(round(float(monto_esperado) * 100))
-    else:
-        monto_ok = True
+    monto_ok = True if monto_esperado is None else int(safe_get(session_dict, "amount_total", 0) or 0) == int(round(float(monto_esperado) * 100))
     ref_ok = bool(external_reference_reserva and ref_stripe == external_reference_reserva)
     correo_ok = bool(correo_reserva and correo_stripe == correo_reserva)
     if external_reference_reserva and not (ref_ok or (correo_ok and monto_ok)):
@@ -849,7 +924,7 @@ def renderizar_mapa_interactivo():
     estados_bd = obtener_estado_boletos_bd(df_v, df_r)
     estados_pantalla, vendidos, reservados_bd, pre_reservados_otros = {}, 0, 0, 0
     for i in range(TOTAL_BOLETOS):
-        num = f"{i:03d}"
+        num = formatear_numero_boleto(i)
         if num in estados_bd:
             estados_pantalla[num] = estados_bd[num]
             vendidos += 1 if estados_bd[num] == "vendido_db" else 0
@@ -897,11 +972,15 @@ def renderizar_mapa_interactivo():
         estilos.append(f"<style>.{clase} button {{background:{fondo} !important; border-color:{borde} !important; color:{color} !important;}}</style>")
     st.markdown("\n".join(estilos), unsafe_allow_html=True)
 
+    filas_mapa = math.ceil(TOTAL_BOLETOS / COLUMNAS_MAPA)
     with st.container(key="mapa_boletos_grid"):
-        for fila in range(10):
-            cols = st.columns(10)
-            for col_idx in range(10):
-                num = f"{(fila * 10 + col_idx):03d}"
+        for fila in range(filas_mapa):
+            cols = st.columns(COLUMNAS_MAPA)
+            for col_idx in range(COLUMNAS_MAPA):
+                indice_boleto = fila * COLUMNAS_MAPA + col_idx
+                if indice_boleto >= TOTAL_BOLETOS:
+                    continue
+                num = formatear_numero_boleto(indice_boleto)
                 estado = estados_pantalla[num]
                 with cols[col_idx]:
                     if estado == "vendido_db":
@@ -923,6 +1002,7 @@ def renderizar_mapa_interactivo():
                                 if num not in st.session_state.selected_tickets:
                                     st.session_state.selected_tickets.append(num)
                             st.rerun()
+
 
 def procesar_retorno_pago(conn: GSheetsConnection):
     qp = st.query_params
@@ -994,7 +1074,7 @@ def inicializar_estado():
 
 def main():
     st.set_page_config(page_title="Rifa de Celular", page_icon="🎟️", layout="wide")
-    st.markdown(CSS_CUSTOM, unsafe_allow_html=True)
+    st.markdown(CSS_CUSTOM.replace("{COLUMNAS_MAPA}", str(COLUMNAS_MAPA)), unsafe_allow_html=True)
     inicializar_estado()
     if not MP_ACCESS_TOKEN:
         st.warning("Mercado Pago no esta configurado.")
@@ -1009,7 +1089,7 @@ def main():
         st.markdown("### 🎫 Consulta tus boletos")
         c1, c2 = st.columns(2)
         with c1:
-            buscar_num = st.text_input("Numero de boleto (ej. 005):")
+            buscar_num = st.text_input(f"Numero de boleto (ej. {formatear_numero_boleto(min(5, TOTAL_BOLETOS - 1))}):")
         with c2:
             buscar_correo = st.text_input("Correo asociado:")
         if st.button("🔴 Verificar Pago y Descargar PDF", type="primary", key="btn_verificar_pago_pdf"):
