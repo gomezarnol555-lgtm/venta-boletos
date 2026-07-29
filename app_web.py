@@ -13,8 +13,6 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from reportlab.graphics.barcode import qr
-from reportlab.graphics.shapes import Drawing
 from streamlit_gsheets import GSheetsConnection
 
 try:
@@ -32,16 +30,11 @@ TIEMPO_PRERESERVA_MINUTOS = 15
 
 # ============================================================
 # CONFIGURACION GENERAL DE LA RIFA
-# Cambia solamente estas dos variables. El mapa, los digitos,
+# Cambia solamente estas variables. El mapa, los digitos,
 # el precio, Mercado Pago, Stripe, Sheets y PDF se adaptan.
-# Ejemplos:
-# TOTAL_BOLETOS = 100  -> boletos 00 a 99
-# TOTAL_BOLETOS = 1000 -> boletos 000 a 999
 # ============================================================
 TOTAL_BOLETOS = 100
 PRECIO_BOLETO = 15.00
-
-# Variables impresas en el boleto PDF
 NOMBRE_EVENTO = "Gran Rifa"
 FECHA_VIGENCIA_BOLETO = "31/12/2026"
 MENSAJE_GENERAL_BOLETO = (
@@ -108,11 +101,6 @@ CSS_CUSTOM = """
     box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18) !important;
     filter: brightness(1.03) !important;
 }
-[data-testid="stButton"] button:active,
-[data-testid="stLinkButton"] a:active {
-    transform: translateY(0px) scale(0.99) !important;
-    filter: brightness(0.97) !important;
-}
 .metric-container { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
 .metric-box {
     flex: 1; min-width: 120px; background: white; padding: 10px; border-radius: 8px; text-align: center;
@@ -161,19 +149,16 @@ CSS_CUSTOM = """
     white-space: pre-line !important;
 }
 @media (max-width: 900px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(32px, 1fr)) !important; gap: 8px !important; }
-    .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height: 56px !important; font-size: 12px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(32px, 1fr)) !important; gap: 5px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height: 48px !important; font-size: 10.5px !important; padding: 1px !important; }
     .metric-container { display: grid !important; grid-template-columns: repeat(2, minmax(120px, 1fr)) !important; gap: 8px !important; }
 }
 @media (max-width: 540px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(28px, 1fr)) !important; gap: 6px !important; }
-    .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height: 52px !important; font-size: 11.5px !important; padding: 1px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(24px, 1fr)) !important; gap: 3px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height: 40px !important; font-size: 9px !important; padding: 0 !important; }
     .metric-container { grid-template-columns: repeat(2, minmax(110px, 1fr)) !important; }
     .metric-box h2 { font-size: 17px !important; }
     .metric-box p { font-size: 11px !important; }
-}
-@media (max-width: 390px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(24px, 1fr)) !important; gap: 6px !important; }
 }
 </style>
 """
@@ -277,39 +262,6 @@ def texto_boletos(datos_boletos: List[Dict[str, Any]]) -> str:
         if numero and numero not in numeros:
             numeros.append(numero)
     return ", ".join(numeros)
-
-
-def crear_qr_boleto(datos_boletos: List[Dict[str, Any]]) -> Drawing:
-    boletos_txt = texto_boletos(datos_boletos) or "N/A"
-    nombre_cliente = ""
-    id_visual = ""
-
-    if datos_boletos:
-        nombre_cliente = str(datos_boletos[0].get("Nombre", ""))
-        numero_base = parse_ticket_number(datos_boletos[0].get("Numero_Boleto", ""))
-        id_visual = f"Bol-{numero_base}" if numero_base else "Bol-N/A"
-
-    # Contenido corto para mejorar la lectura del QR en celulares.
-    # No contiene claves de pago, sesiones Stripe ni datos sensibles.
-    contenido_qr = (
-        f"EVENTO:{NOMBRE_EVENTO}\n"
-        f"BOLETO:{boletos_txt}\n"
-        f"ID:{id_visual}\n"
-        f"NOMBRE:{nombre_cliente}\n"
-        f"VIGENCIA:{FECHA_VIGENCIA_BOLETO}"
-    )
-
-    qr_widget = qr.QrCodeWidget(contenido_qr)
-    bounds = qr_widget.getBounds()
-    ancho = bounds[2] - bounds[0]
-    alto = bounds[3] - bounds[1]
-
-    # QR mas grande y con margen suficiente para facilitar el escaneo.
-    tamano_final = 122
-    escala = tamano_final / max(ancho, alto)
-    dibujo = Drawing(130, 130, transform=[escala, 0, 0, escala, 4, 4])
-    dibujo.add(qr_widget)
-    return dibujo
 
 
 def mostrar_diagnostico_pagos():
@@ -489,7 +441,7 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
             "ID_Boleto": f"BOL-{random.randint(10000, 99999)}",
             "Nombre": r.get("Nombre", ""),
             "Correo": r.get("Correo", ""),
-            "Evento": "Rifa de Celular",
+            "Evento": NOMBRE_EVENTO,
             "Numero_Boleto": parse_ticket_number(r.get("Numero_Boleto", "")),
             "Precio": r.get("Monto", ""),
             "Metodo_Pago": metodo_pago,
@@ -542,20 +494,16 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=46, leftMargin=46, topMargin=70, bottomMargin=50)
     story = []
     styles = getSampleStyleSheet()
-
     estilo_titulo = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.white, alignment=1)
     estilo_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=9.5, textColor=colors.HexColor("#E2E8F0"), alignment=1)
     estilo_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#334155"))
     estilo_bold = ParagraphStyle("Bold", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#0A2540"))
-    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=24, leading=30, textColor=colors.HexColor("#0A2540"), alignment=1)
+    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=26, leading=32, textColor=colors.HexColor("#0A2540"), alignment=1)
     estilo_evento = ParagraphStyle("Evento", parent=styles["Heading2"], fontSize=13, leading=16, textColor=colors.HexColor("#0A2540"), alignment=1)
     estilo_mensaje = ParagraphStyle("Mensaje", parent=styles["Normal"], fontSize=8.7, leading=11, textColor=colors.HexColor("#475569"), alignment=1)
 
     encabezado = Table(
-        [
-            [Paragraph("BOLETO OFICIAL", estilo_titulo)],
-            [Paragraph(str(NOMBRE_EVENTO), estilo_sub)],
-        ],
+        [[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]],
         colWidths=[500]
     )
     encabezado.setStyle(TableStyle([
@@ -567,57 +515,28 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     story.append(encabezado)
     story.append(Spacer(1, 22))
 
-    resumen_izquierdo = Table(
+    resumen = Table(
         [
-            [Paragraph("Nombre del evento", estilo_bold)],
-            [Paragraph(str(NOMBRE_EVENTO), estilo_evento)],
-            [Paragraph("No. de Boleto", estilo_bold)],
-            [Paragraph(boletos_txt, estilo_num)],
-            [Paragraph("Fecha de vigencia", estilo_bold)],
-            [Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
+            [Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)],
+            [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
+            [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de validacion", estilo_bold)],
+            [Paragraph(boletos_txt, estilo_num), Paragraph(f"Bol-{boletos_txt}", estilo_num)],
         ],
-        colWidths=[345]
+        colWidths=[250, 250]
     )
-    resumen_izquierdo.setStyle(TableStyle([
+    resumen.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
         ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")),
-        ("BACKGROUND", (0, 4), (-1, 4), colors.HexColor("#E0F2FE")),
         ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#0A2540")),
         ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("TOPPADDING", (0, 0), (-1, -1), 8),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
-
-    qr_box = Table(
-        [
-            [crear_qr_boleto(datos_boletos)],
-            [Paragraph("Codigo QR de validacion", estilo_mensaje)],
-        ],
-        colWidths=[145]
-    )
-    qr_box.setStyle(TableStyle([
-        ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#0A2540")),
-        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
-
-    resumen = Table([[resumen_izquierdo, qr_box]], colWidths=[345, 155])
-    resumen.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-    ]))
     story.append(resumen)
     story.append(Spacer(1, 18))
 
-    mensaje = Table(
-        [[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]],
-        colWidths=[500]
-    )
+    mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
     mensaje.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
         ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#CBD5E1")),
@@ -636,7 +555,6 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
             precio_txt = f"${float(boleto.get('Precio', 0) or 0):.2f} {MP_CURRENCY_ID}"
         except Exception:
             precio_txt = str(boleto.get("Precio", ""))
-
         filas.extend([
             [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(id_boleto_pdf, estilo_celda)],
             [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
@@ -820,11 +738,11 @@ def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_
     url_retorno_base = normalizar_url(MP_RETURN_URL)
     titulos_boletos = ", ".join(numeros_boletos)
     preference_data = {
-        "items": [{"title": f"Rifa celular - Boletos: {titulos_boletos}", "quantity": len(numeros_boletos), "unit_price": float(monto_unitario), "currency_id": MP_CURRENCY_ID}],
+        "items": [{"title": f"{NOMBRE_EVENTO} - Boletos: {titulos_boletos}", "quantity": len(numeros_boletos), "unit_price": float(monto_unitario), "currency_id": MP_CURRENCY_ID}],
         "payer": {"name": nombre.strip(), "surname": apellidos.strip() or "Sin Apellido", "email": correo, "phone": {"area_code": "52", "number": telefono}},
         "external_reference": external_reference,
         "payment_methods": {"excluded_payment_methods": [], "excluded_payment_types": [], "installments": 1},
-        "statement_descriptor": "RIFA CELULAR"
+        "statement_descriptor": "RIFA"
     }
     if MP_NOTIFICATION_URL:
         preference_data["notification_url"] = MP_NOTIFICATION_URL
@@ -858,7 +776,7 @@ def crear_sesion_stripe(nombre: str, apellidos: str, correo: str, numeros_boleto
         mode="payment",
         customer_email=correo.strip().lower(),
         client_reference_id=external_reference,
-        line_items=[{"price_data": {"currency": STRIPE_CURRENCY_ID, "unit_amount": int(round(float(monto_unitario) * 100)), "product_data": {"name": "Boletos Rifa de Celular", "description": f"Boletos seleccionados: {descripcion_boletos}"[:500]}}, "quantity": len(numeros_boletos)}],
+        line_items=[{"price_data": {"currency": STRIPE_CURRENCY_ID, "unit_amount": int(round(float(monto_unitario) * 100)), "product_data": {"name": f"Boletos {NOMBRE_EVENTO}", "description": f"Boletos seleccionados: {descripcion_boletos}"[:500]}}, "quantity": len(numeros_boletos)}],
         metadata={"external_reference": external_reference, "boletos": descripcion_boletos, "nombre_cliente": f"{nombre.strip()} {apellidos.strip()}"[:500]},
         payment_intent_data={"metadata": {"external_reference": external_reference}},
         success_url=success_url,
@@ -1001,9 +919,8 @@ def renderizar_mapa_interactivo():
         estilos.append(f"<style>.{clase} button {{background:{fondo} !important; border-color:{borde} !important; color:{color} !important;}}</style>")
     st.markdown("\n".join(estilos), unsafe_allow_html=True)
 
-    filas_mapa = FILAS_MAPA
     with st.container(key="mapa_boletos_grid"):
-        for fila in range(filas_mapa):
+        for fila in range(FILAS_MAPA):
             cols = st.columns(COLUMNAS_MAPA)
             for col_idx in range(COLUMNAS_MAPA):
                 indice_boleto = fila * COLUMNAS_MAPA + col_idx
@@ -1102,7 +1019,7 @@ def inicializar_estado():
 
 
 def main():
-    st.set_page_config(page_title="Rifa de Celular", page_icon="🎟️", layout="wide")
+    st.set_page_config(page_title=NOMBRE_EVENTO, page_icon="🎟️", layout="wide")
     st.markdown(CSS_CUSTOM.replace("{COLUMNAS_MAPA}", str(COLUMNAS_MAPA)), unsafe_allow_html=True)
     inicializar_estado()
     if mercadopago is None:
@@ -1115,7 +1032,7 @@ def main():
         st.warning("Stripe no esta configurado.")
     conn = st.connection("gsheets", type=GSheetsConnection)
     procesar_retorno_pago(conn)
-    st.title("🎟️ Plataforma de Boletos - Gran Rifa")
+    st.title(f"🎟️ Plataforma de Boletos - {NOMBRE_EVENTO}")
     tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🎫 Buscar mis Boletos / Verificar Pago"])
 
     with tab2:
