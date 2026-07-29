@@ -16,6 +16,7 @@ from streamlit_gsheets import GSheetsConnection
 
 import mercadopago
 import stripe
+
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
 TOTAL_BOLETOS = 100
@@ -51,23 +52,27 @@ if STRIPE_SECRET_KEY:
 CSS_CUSTOM = """
 <style>
 [data-testid="column"] { padding: 0 4px !important; }
-[data-testid="stButton"] button {
+[data-testid="stButton"] button,
+[data-testid="stLinkButton"] a {
     width: 100%;
-    height: 60px;
-    padding: 0;
-    font-weight: 800;
-    font-size: 13px;
-    line-height: 1.05;
-    transition: all 0.18s ease-in-out;
-    border-radius: 12px;
-    border: 1.5px dashed #94A3B8;
-    box-shadow: 0 2px 5px rgba(15, 23, 42, 0.10);
-    background-image: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(248,250,252,0.92));
+    min-height: 52px;
+    padding: 4px 6px;
+    border-radius: 13px !important;
+    font-weight: 850 !important;
+    letter-spacing: 0.15px !important;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease, border-color 0.16s ease !important;
+    box-shadow: 0 3px 9px rgba(15, 23, 42, 0.12) !important;
 }
-[data-testid="stButton"] button:hover {
-    transform: translateY(-1px) scale(1.02);
-    border-color: #004481;
-    box-shadow: 0 5px 12px rgba(15, 23, 42, 0.16);
+[data-testid="stButton"] button:hover,
+[data-testid="stLinkButton"] a:hover {
+    transform: translateY(-2px) scale(1.01) !important;
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18) !important;
+    filter: brightness(1.03) !important;
+}
+[data-testid="stButton"] button:active,
+[data-testid="stLinkButton"] a:active {
+    transform: translateY(0px) scale(0.99) !important;
+    filter: brightness(0.97) !important;
 }
 .metric-container { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
 .metric-box {
@@ -80,101 +85,10 @@ CSS_CUSTOM = """
 .m-gray { border-color: #94A3B8; }
 .m-yellow { border-color: #F59E0B; }
 .m-red { border-color: #EF4444; }
-.small-help {color:#64748B; font-size: 0.9rem;}
 
-
-/* Mapa tipo ticket con colores por estado */
-.ticket-grid {
-    display: grid;
-    grid-template-columns: repeat(10, minmax(54px, 1fr));
-    gap: 8px;
-    margin-top: 8px;
-}
-.ticket-card {
-    min-height: 54px;
-    border-radius: 12px;
-    border: 1.8px dashed #94A3B8;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    text-decoration: none !important;
-    font-weight: 900;
-    font-size: 13px;
-    letter-spacing: 0.2px;
-    box-shadow: 0 3px 8px rgba(15, 23, 42, 0.12);
-    transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease;
-    position: relative;
-    overflow: hidden;
-}
-.ticket-card::before,
-.ticket-card::after {
-    content: none !important;
-    display: none !important;
-}
-.ticket-card:hover {
-    transform: translateY(-2px) scale(1.025);
-    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
-    filter: brightness(1.02);
-}
-.ticket-icon { font-size: 16px; line-height: 17px; }
-.ticket-num { font-size: 13px; line-height: 14px; }
-.ticket-disponible {
-    color: #064E3B !important;
-    background: linear-gradient(145deg, #D1FAE5, #F0FDF4);
-    border-color: #10B981;
-}
-.ticket-seleccionado {
-    color: #0A2540 !important;
-    background: linear-gradient(145deg, #BAE6FD, #E0F2FE);
-    border-color: #0284C7;
-}
-.ticket-vendido {
-    color: #7F1D1D !important;
-    background: linear-gradient(145deg, #FECACA, #FEF2F2);
-    border-color: #EF4444;
-    cursor: not-allowed;
-}
-.ticket-reservado {
-    color: #7C2D12 !important;
-    background: linear-gradient(145deg, #FED7AA, #FFF7ED);
-    border-color: #F59E0B;
-    cursor: not-allowed;
-}
-.ticket-carrito {
-    color: #334155 !important;
-    background: linear-gradient(145deg, #E2E8F0, #F8FAFC);
-    border-color: #64748B;
-    cursor: not-allowed;
-}
-@media (max-width: 900px) {
-    .ticket-grid { grid-template-columns: repeat(5, minmax(52px, 1fr)); }
-}
-@media (max-width: 520px) {
-    .ticket-grid { grid-template-columns: repeat(4, minmax(50px, 1fr)); gap: 6px; }
-    .ticket-card { min-height: 50px; font-size: 12px; }
-}
-
-/* Boton rojo dinamico para Verificar Pago y Descargar PDF */
+/* Botones rojos dinamicos */
+.st-key-btn_confirmar_metodo_pago button,
 .st-key-btn_verificar_pago_pdf button {
-    background: linear-gradient(135deg, #DC2626, #991B1B) !important;
-    color: white !important;
-    border: 0 !important;
-    border-radius: 12px !important;
-    box-shadow: 0 6px 16px rgba(220, 38, 38, 0.35) !important;
-    font-weight: 900 !important;
-    letter-spacing: 0.2px !important;
-}
-.st-key-btn_verificar_pago_pdf button:hover {
-    transform: translateY(-2px) scale(1.01) !important;
-    box-shadow: 0 10px 24px rgba(220, 38, 38, 0.45) !important;
-    filter: brightness(1.05) !important;
-}
-
-
-
-/* Boton rojo dinamico para Confirmar y elegir metodo de pago */
-.st-key-btn_confirmar_metodo_pago button {
     background: linear-gradient(135deg, #DC2626, #7F1D1D) !important;
     color: #FFFFFF !important;
     border: 0 !important;
@@ -184,19 +98,36 @@ CSS_CUSTOM = """
     letter-spacing: 0.25px !important;
     min-height: 54px !important;
 }
-.st-key-btn_confirmar_metodo_pago button:hover {
+.st-key-btn_confirmar_metodo_pago button:hover,
+.st-key-btn_verificar_pago_pdf button:hover {
     transform: translateY(-2px) scale(1.012) !important;
     box-shadow: 0 11px 26px rgba(220, 38, 38, 0.48) !important;
     filter: brightness(1.07) !important;
 }
-.st-key-btn_confirmar_metodo_pago button:active {
-    transform: translateY(0px) scale(0.99) !important;
-    filter: brightness(0.96) !important;
-}
 
+/* Movil */
+@media (max-width: 900px) {
+    [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; gap: 0.35rem !important; }
+    [data-testid="column"] { min-width: 18% !important; flex: 1 1 18% !important; }
+    div[class*="st-key-btn_"] button {
+        min-height: 54px !important; font-size: 12px !important; border-radius: 12px !important;
+        line-height: 1.0 !important; padding: 2px 1px !important;
+    }
+    .metric-container { display: grid !important; grid-template-columns: repeat(2, minmax(120px, 1fr)) !important; gap: 8px !important; }
+}
+@media (max-width: 540px) {
+    [data-testid="column"] { min-width: 23% !important; flex: 1 1 23% !important; padding-left: 2px !important; padding-right: 2px !important; }
+    div[class*="st-key-btn_"] button { min-height: 50px !important; font-size: 11.5px !important; border-width: 1.4px !important; }
+    .metric-container { grid-template-columns: repeat(2, minmax(110px, 1fr)) !important; }
+    .metric-box h2 { font-size: 17px !important; }
+    .metric-box p { font-size: 11px !important; }
+}
+@media (max-width: 390px) {
+    [data-testid="column"] { min-width: 30% !important; flex: 1 1 30% !important; }
+    div[class*="st-key-btn_"] button { min-height: 48px !important; font-size: 11px !important; }
+}
 </style>
 """
-
 
 
 def normalizar_url(url: str) -> str:
@@ -290,22 +221,7 @@ def normalizar_fecha_unix(fecha_txt: str, dias_antes: int = 5, dias_despues: int
         fecha = pd.to_datetime(str(fecha_txt)).to_pydatetime()
     except Exception:
         fecha = datetime.now()
-    return {
-        "gte": int((fecha - timedelta(days=dias_antes)).timestamp()),
-        "lte": int((fecha + timedelta(days=dias_despues)).timestamp()),
-    }
-
-
-def ocultar_id_sensible(valor: Any) -> str:
-    valor = str(valor or "").strip()
-    if not valor:
-        return ""
-    prefijos_sensibles = ["cs_", "pi_", "seti_", "ch_", "pay_", "pref_"]
-    if any(valor.startswith(p) for p in prefijos_sensibles):
-        return "PAGO_CONFIRMADO"
-    if len(valor) > 18:
-        return "PAGO_CONFIRMADO"
-    return valor
+    return {"gte": int((fecha - timedelta(days=dias_antes)).timestamp()), "lte": int((fecha + timedelta(days=dias_despues)).timestamp())}
 
 
 def texto_boletos(datos_boletos: List[Dict[str, Any]]) -> str:
@@ -339,8 +255,7 @@ def obtener_pre_reservas_globales() -> dict:
 
 def limpiar_pre_reservas_expiradas(pre_reservas: dict):
     ahora = datetime.now()
-    expirados = [k for k, v in list(pre_reservas.items()) if v["expires_at"] < ahora]
-    for k in expirados:
+    for k in [k for k, v in list(pre_reservas.items()) if v["expires_at"] < ahora]:
         del pre_reservas[k]
 
 
@@ -358,19 +273,11 @@ def limpiar_carrito_local():
 
 
 def columnas_ventas() -> list:
-    return [
-        "ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago",
-        "Fecha_Compra", "Numero_Telefonico", "Estado_Pago", "Referencia_Pago", "MercadoPago_Payment_ID",
-        "MercadoPago_Preference_ID", "Stripe_Payment_ID", "Stripe_Session_ID", "Proveedor_Pago"
-    ]
+    return ["ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio", "Metodo_Pago", "Codigo_Pago", "Fecha_Compra", "Numero_Telefonico", "Estado_Pago", "Referencia_Pago", "MercadoPago_Payment_ID", "MercadoPago_Preference_ID", "Stripe_Payment_ID", "Stripe_Session_ID", "Proveedor_Pago"]
 
 
 def columnas_reservas() -> list:
-    return [
-        "External_Reference", "MercadoPago_Preference_ID", "MercadoPago_Payment_ID", "Stripe_Session_ID",
-        "Stripe_Payment_ID", "Numero_Boleto", "Nombre", "Correo", "Numero_Telefonico", "Monto",
-        "Estado_Reserva", "Fecha_Creacion", "Expira_En", "Fecha_Actualizacion"
-    ]
+    return ["External_Reference", "MercadoPago_Preference_ID", "MercadoPago_Payment_ID", "Stripe_Session_ID", "Stripe_Payment_ID", "Numero_Boleto", "Nombre", "Correo", "Numero_Telefonico", "Monto", "Estado_Reserva", "Fecha_Creacion", "Expira_En", "Fecha_Actualizacion"]
 
 
 def asegurar_columnas(df: pd.DataFrame, cols: list) -> pd.DataFrame:
@@ -528,8 +435,6 @@ def dibujar_fondo_autenticidad(canvas, doc):
     canvas.saveState()
     canvas.setFillColor(colors.HexColor("#F8FAFC"))
     canvas.rect(0, 0, width, height, fill=1, stroke=0)
-
-    # Marca de agua de autenticidad
     canvas.setFillColor(colors.Color(0.10, 0.18, 0.30, alpha=0.045))
     canvas.setFont("Helvetica-Bold", 42)
     canvas.translate(width / 2, height / 2)
@@ -538,166 +443,66 @@ def dibujar_fondo_autenticidad(canvas, doc):
         canvas.drawCentredString(0, y, "BOLETO OFICIAL")
     canvas.rotate(-32)
     canvas.translate(-width / 2, -height / 2)
-
-    # Marco tipo ticket
     canvas.setStrokeColor(colors.HexColor("#0A2540"))
     canvas.setLineWidth(1.15)
     canvas.roundRect(24, 24, width - 48, height - 48, 16, fill=0, stroke=1)
-
-    # Bandas de seguridad
     canvas.setFillColor(colors.HexColor("#0A2540"))
     canvas.roundRect(42, height - 112, width - 84, 48, 10, fill=1, stroke=0)
     canvas.roundRect(42, 58, width - 84, 26, 8, fill=1, stroke=0)
-
-    # Perforaciones laterales
-    canvas.setFillColor(colors.HexColor("#F8FAFC"))
-    for y in range(130, int(height - 135), 26):
-        canvas.circle(42, y, 6, fill=1, stroke=0)
-        canvas.circle(width - 42, y, 6, fill=1, stroke=0)
-
-    # Lineas punteadas
-    canvas.setStrokeColor(colors.HexColor("#CBD5E1"))
     canvas.setDash(3, 4)
+    canvas.setStrokeColor(colors.HexColor("#CBD5E1"))
     canvas.line(62, 118, width - 62, 118)
     canvas.line(62, height - 130, width - 62, height - 130)
     canvas.setDash()
     canvas.restoreState()
 
+
 def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     boletos_txt = texto_boletos(datos_boletos) or "N/A"
     nombre_archivo = f"Boleto_{boletos_txt.replace(', ', '_')}.pdf"
-
-    doc = SimpleDocTemplate(
-        nombre_archivo,
-        pagesize=letter,
-        rightMargin=46,
-        leftMargin=46,
-        topMargin=70,
-        bottomMargin=50
-    )
-
+    doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=46, leftMargin=46, topMargin=70, bottomMargin=50)
     story = []
     styles = getSampleStyleSheet()
+    estilo_titulo = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.white, alignment=1)
+    estilo_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=9.5, textColor=colors.HexColor("#E2E8F0"), alignment=1)
+    estilo_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#334155"))
+    estilo_bold = ParagraphStyle("Bold", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#0A2540"))
+    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=24, leading=30, textColor=colors.HexColor("#0A2540"), alignment=1)
 
-    estilo_titulo_blanco = ParagraphStyle(
-        "TituloBlanco",
-        parent=styles["Heading1"],
-        fontSize=20,
-        leading=24,
-        textColor=colors.white,
-        alignment=1,
-        spaceAfter=0
-    )
-    estilo_subtitulo = ParagraphStyle(
-        "Subtitulo",
-        parent=styles["Normal"],
-        fontSize=9.5,
-        leading=12,
-        textColor=colors.HexColor("#E2E8F0"),
-        alignment=1
-    )
-    estilo_celda = ParagraphStyle(
-        "CeldaTicket",
-        parent=styles["Normal"],
-        fontSize=10.5,
-        leading=13,
-        textColor=colors.HexColor("#334155")
-    )
-    estilo_celda_bold = ParagraphStyle(
-        "CeldaTicketBold",
-        parent=styles["Normal"],
-        fontSize=10.5,
-        leading=13,
-        textColor=colors.HexColor("#0A2540")
-    )
-    estilo_boleto_numero = ParagraphStyle(
-        "BoletoNumero",
-        parent=styles["Heading1"],
-        fontSize=24,
-        leading=30,
-        textColor=colors.HexColor("#0A2540"),
-        alignment=1
-    )
-    estilo_nota = ParagraphStyle(
-        "NotaTicket",
-        parent=styles["Normal"],
-        fontSize=8.8,
-        leading=11,
-        textColor=colors.HexColor("#64748B"),
-        alignment=1
-    )
-
-    encabezado = Table(
-        [[Paragraph("BOLETO OFICIAL", estilo_titulo_blanco)],
-         [Paragraph("Comprobante de boletos registrados", estilo_subtitulo)]],
-        colWidths=[500]
-    )
-    encabezado.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-    ]))
+    encabezado = Table([[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph("Comprobante de boletos registrados", estilo_sub)]], colWidths=[500])
+    encabezado.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
     story.append(encabezado)
     story.append(Spacer(1, 30))
 
-    # Resumen de boletos en formato visible
-    resumen = Table(
-        [[Paragraph("No. de Boleto", estilo_celda_bold)],
-         [Paragraph(boletos_txt, estilo_boleto_numero)]],
-        colWidths=[500]
-    )
-    resumen.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
-        ("BACKGROUND", (0, 1), (-1, 1), colors.white),
-        ("BOX", (0, 0), (-1, -1), 1.1, colors.HexColor("#0A2540")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 12),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
-    ]))
+    resumen = Table([[Paragraph("No. de Boleto", estilo_bold)], [Paragraph(boletos_txt, estilo_num)]], colWidths=[500])
+    resumen.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")), ("BACKGROUND", (0, 1), (-1, 1), colors.white), ("BOX", (0, 0), (-1, -1), 1.1, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 12), ("BOTTOMPADDING", (0, 0), (-1, -1), 12)]))
     story.append(resumen)
     story.append(Spacer(1, 22))
 
     filas = []
     for boleto in datos_boletos:
-        fecha_compra = str(boleto.get("Fecha_Compra", "") or "")
-        if fecha_compra:
-            fecha_compra = fecha_compra.split(" ")[0]
-        else:
-            fecha_compra = datetime.now().strftime("%Y-%m-%d")
+        fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0] or datetime.now().strftime("%Y-%m-%d")
         try:
-            precio_float = float(boleto.get("Precio", 0) or 0)
-            precio_txt = f"${precio_float:.2f} {MP_CURRENCY_ID}"
+            precio_txt = f"${float(boleto.get('Precio', 0) or 0):.2f} {MP_CURRENCY_ID}"
         except Exception:
             precio_txt = str(boleto.get("Precio", ""))
         filas.extend([
-            [Paragraph("<b>ID de Boleto:</b>", estilo_celda_bold), Paragraph(str(boleto.get("ID_Boleto", "")), estilo_celda)],
-            [Paragraph("<b>Nombre:</b>", estilo_celda_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
-            [Paragraph("<b>No. de Boleto:</b>", estilo_celda_bold), Paragraph(parse_ticket_number(boleto.get("Numero_Boleto", "")), estilo_celda)],
-            [Paragraph("<b>Precio Pagado:</b>", estilo_celda_bold), Paragraph(precio_txt, estilo_celda)],
-            [Paragraph("<b>Metodo de Pago:</b>", estilo_celda_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)],
-            [Paragraph("<b>Fecha:</b>", estilo_celda_bold), Paragraph(fecha_compra, estilo_celda)],
+            [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(str(boleto.get("ID_Boleto", "")), estilo_celda)],
+            [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
+            [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(parse_ticket_number(boleto.get("Numero_Boleto", "")), estilo_celda)],
+            [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)],
+            [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)],
+            [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)],
         ])
         if len(datos_boletos) > 1:
             filas.append([Paragraph("", estilo_celda), Paragraph("", estilo_celda)])
 
     detalle = Table(filas, colWidths=[160, 340])
-    detalle.setStyle(TableStyle([
-        ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#0A2540")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")),
-        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-    ]))
+    detalle.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
     story.append(detalle)
-    story.append(Spacer(1, 24))
-
-
-
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
+
 
 def procesar_descarga_pdf(datos_boletos: List[dict]):
     if not datos_boletos:
@@ -719,20 +524,16 @@ def construir_pago_stripe_desde_session(session: Any, external_reference_reserva
     customer_details = safe_get(session_dict, "customer_details", {}) or {}
     correo_stripe = str(safe_get(session_dict, "customer_email", "") or safe_get(customer_details, "email", "") or "").strip().lower()
     correo_reserva = str(correo_reserva or "").strip().lower()
-    monto_ok = True
     if monto_esperado is not None:
         monto_ok = int(safe_get(session_dict, "amount_total", 0) or 0) == int(round(float(monto_esperado) * 100))
+    else:
+        monto_ok = True
     ref_ok = bool(external_reference_reserva and ref_stripe == external_reference_reserva)
     correo_ok = bool(correo_reserva and correo_stripe == correo_reserva)
     if external_reference_reserva and not (ref_ok or (correo_ok and monto_ok)):
         return None
     payment_intent = safe_get(session_dict, "payment_intent", None)
-    if isinstance(payment_intent, str):
-        payment_intent_id = payment_intent
-    elif payment_intent:
-        payment_intent_id = str(safe_get(payment_intent, "id", ""))
-    else:
-        payment_intent_id = str(safe_get(session_dict, "id", ""))
+    payment_intent_id = payment_intent if isinstance(payment_intent, str) else str(safe_get(payment_intent, "id", "") or safe_get(session_dict, "id", ""))
     return {"id": payment_intent_id, "external_reference": ref_stripe or external_reference_reserva, "payment_type_id": "stripe_card", "status": "approved", "provider": "STRIPE", "provider_session_id": str(safe_get(session_dict, "id", ""))}
 
 
@@ -749,21 +550,16 @@ def obtener_pago_stripe(stripe_session_id: str, external_reference_esperada: Opt
 
 def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_reference_esperada: Optional[str] = None, monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY or not payment_intent_id:
-        st.session_state.ultimo_error_pago = "Stripe: falta STRIPE_SECRET_KEY o PaymentIntent."
         return None
     payment_intent_id = str(payment_intent_id or "").strip()
     if not payment_intent_id.startswith("pi_"):
         return None
     try:
         intent = stripe.PaymentIntent.retrieve(payment_intent_id, expand=["latest_charge"])
-        estado = str(safe_get(intent, "status", "")).strip().lower()
-        if estado != "succeeded":
-            st.session_state.ultimo_error_pago = f"Stripe: PaymentIntent no aprobado. status={estado}"
+        if str(safe_get(intent, "status", "")).strip().lower() != "succeeded":
             return None
-        if monto_esperado is not None:
-            if int(safe_get(intent, "amount", 0) or 0) != int(round(float(monto_esperado) * 100)):
-                st.session_state.ultimo_error_pago = "Stripe: monto no coincide."
-                return None
+        if monto_esperado is not None and int(safe_get(intent, "amount", 0) or 0) != int(round(float(monto_esperado) * 100)):
+            return None
         metadata = dict(safe_get(intent, "metadata", {}) or {})
         return {"id": payment_intent_id, "external_reference": metadata.get("external_reference") or external_reference_esperada or "", "payment_type_id": "stripe_card", "status": "approved", "provider": "STRIPE", "provider_session_id": ""}
     except Exception as e:
@@ -774,9 +570,8 @@ def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_refe
 def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY:
         return None
-    rango_fecha = normalizar_fecha_unix(fecha_creacion_reserva)
     try:
-        sesiones = stripe.checkout.Session.list(limit=100, status="complete", created=rango_fecha, expand=["data.payment_intent"])
+        sesiones = stripe.checkout.Session.list(limit=100, status="complete", created=normalizar_fecha_unix(fecha_creacion_reserva), expand=["data.payment_intent"])
         for session in safe_data_list(sesiones):
             pago = construir_pago_stripe_desde_session(session, external_reference, correo, monto_esperado)
             if pago:
@@ -790,10 +585,9 @@ def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, corr
 def buscar_pago_stripe_payment_intent_por_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not STRIPE_SECRET_KEY:
         return None
-    rango_fecha = normalizar_fecha_unix(fecha_creacion_reserva)
-    monto_centavos = int(round(float(monto_esperado) * 100)) if monto_esperado is not None else None
     try:
-        intents = stripe.PaymentIntent.list(limit=100, created=rango_fecha, expand=["data.latest_charge"])
+        monto_centavos = int(round(float(monto_esperado) * 100)) if monto_esperado is not None else None
+        intents = stripe.PaymentIntent.list(limit=100, created=normalizar_fecha_unix(fecha_creacion_reserva), expand=["data.latest_charge"])
         for intent in safe_data_list(intents):
             if str(safe_get(intent, "status", "")).strip().lower() != "succeeded":
                 continue
@@ -813,23 +607,15 @@ def buscar_pago_stripe_payment_intent_por_correo_fecha(external_reference: str, 
 def buscar_pago_mercadopago_por_referencia_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
     if not sdk:
         return None
-    external_reference = str(external_reference or "").strip()
-    correo = str(correo or "").strip().lower()
-    def monto_ok(pago: Dict[str, Any]) -> bool:
-        if monto_esperado is None:
-            return True
-        try:
-            return abs(float(pago.get("transaction_amount", 0)) - float(monto_esperado)) < 0.01
-        except Exception:
-            return False
     try:
-        respuesta = sdk.payment().search({"external_reference": external_reference, "status": "approved", "sort": "date_created", "criteria": "desc"}).get("response", {})
+        respuesta = sdk.payment().search({"external_reference": str(external_reference or ""), "status": "approved", "sort": "date_created", "criteria": "desc"}).get("response", {})
         for pago in respuesta.get("results", []):
-            if pago.get("status") == "approved" and monto_ok(pago):
-                pago["provider"] = "MERCADO_PAGO"
-                if not pago.get("external_reference"):
-                    pago["external_reference"] = external_reference
-                return pago
+            if pago.get("status") == "approved":
+                if monto_esperado is None or abs(float(pago.get("transaction_amount", 0) or 0) - float(monto_esperado)) < 0.01:
+                    pago["provider"] = "MERCADO_PAGO"
+                    if not pago.get("external_reference"):
+                        pago["external_reference"] = external_reference
+                    return pago
         return None
     except Exception as e:
         st.session_state.ultimo_error_pago = f"MP conciliacion: {e}"
@@ -838,9 +624,9 @@ def buscar_pago_mercadopago_por_referencia_correo_fecha(external_reference: str,
 
 def extraer_ids_pago_de_reserva(grupo_reserva: pd.DataFrame) -> Dict[str, str]:
     ids = {"stripe_session_id": "", "stripe_payment_id": "", "mp_payment_id": "", "mp_preference_id": ""}
-    columnas_posibles = ["Stripe_Session_ID", "Stripe_Payment_ID", "MercadoPago_Payment_ID", "MercadoPago_Preference_ID", "External_Reference", "Numero_Boleto", "Nombre", "Correo", "Numero_Telefonico", "Monto", "Estado_Reserva", "Fecha_Creacion", "Expira_En", "Fecha_Actualizacion"]
+    cols = ["Stripe_Session_ID", "Stripe_Payment_ID", "MercadoPago_Payment_ID", "MercadoPago_Preference_ID", "External_Reference", "Numero_Boleto", "Nombre", "Correo", "Numero_Telefonico", "Monto", "Estado_Reserva", "Fecha_Creacion", "Expira_En", "Fecha_Actualizacion"]
     for _, fila in grupo_reserva.iterrows():
-        for columna in columnas_posibles:
+        for columna in cols:
             valor = str(fila.get(columna, "")).strip()
             if not valor or valor.lower() == "nan":
                 continue
@@ -871,12 +657,6 @@ def obtener_pago_mercadopago_por_payment_id(payment_id: str, external_reference_
     except Exception as e:
         st.session_state.ultimo_error_pago = f"MP payment_id retrieve: {e}"
         return None
-
-
-def buscar_pago_mercadopago_por_preference_id(preference_id: str, external_reference_esperada: str = "", monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
-    if not sdk or not preference_id:
-        return None
-    return buscar_pago_mercadopago_por_referencia_correo_fecha(external_reference_esperada, correo_reserva, monto_esperado, "")
 
 
 def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_boletos: list, monto_unitario: float, external_reference: str):
@@ -1003,15 +783,9 @@ def renderizar_mapa_interactivo():
     mi_sesion = st.session_state.session_id
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
-
     if not (st.session_state.get("pago_generado_url") or st.session_state.get("stripe_pago_url")):
-        st.session_state.selected_tickets = [
-            t for t in st.session_state.selected_tickets
-            if t in pre_reservas and pre_reservas[t]["session_id"] == mi_sesion
-        ]
-
+        st.session_state.selected_tickets = [t for t in st.session_state.selected_tickets if t in pre_reservas and pre_reservas[t]["session_id"] == mi_sesion]
     conn = st.connection("gsheets", type=GSheetsConnection)
-
     try:
         df_v = conn.read(worksheet="Ventas", ttl=5).dropna(how="all")
         df_r = conn.read(worksheet="Reservas", ttl=5).dropna(how="all")
@@ -1020,33 +794,23 @@ def renderizar_mapa_interactivo():
         df_r = pd.DataFrame(columns=columnas_reservas())
 
     estados_bd = obtener_estado_boletos_bd(df_v, df_r)
-    estados_pantalla = {}
-    vendidos = 0
-    reservados_bd = 0
-    pre_reservados_otros = 0
-
+    estados_pantalla, vendidos, reservados_bd, pre_reservados_otros = {}, 0, 0, 0
     for i in range(TOTAL_BOLETOS):
         num = f"{i:03d}"
-
         if num in estados_bd:
             estados_pantalla[num] = estados_bd[num]
-            if estados_bd[num] == "vendido_db":
-                vendidos += 1
-            elif estados_bd[num] == "reservado_db":
-                reservados_bd += 1
-
+            vendidos += 1 if estados_bd[num] == "vendido_db" else 0
+            reservados_bd += 1 if estados_bd[num] == "reservado_db" else 0
         elif num in pre_reservas:
             if pre_reservas[num]["session_id"] == mi_sesion:
                 estados_pantalla[num] = "pre_reservado_mio"
             else:
                 estados_pantalla[num] = "pre_reservado_otros"
                 pre_reservados_otros += 1
-
         else:
             estados_pantalla[num] = "disponible"
 
     disponibles = TOTAL_BOLETOS - vendidos - reservados_bd - pre_reservados_otros - len(st.session_state.selected_tickets)
-
     st.markdown(f"""
     <div class="metric-container">
         <div class="metric-box m-green"><h2>🟢 {disponibles}</h2><p>Libres</p></div>
@@ -1056,104 +820,56 @@ def renderizar_mapa_interactivo():
     </div>
     """, unsafe_allow_html=True)
 
-    # Estilo dinamico por boleto. Mantiene st.button y la logica original,
-    # pero aplica visual tipo ticket y color de acuerdo con el estado real.
-    estilos_boletos = []
-
-    estilos_base = """
+    estilos = ["""
     <style>
     div[class*="st-key-btn_"] button {
-        min-height: 58px !important;
-        border-radius: 14px !important;
-        border-style: dashed !important;
-        border-width: 1.8px !important;
-        font-weight: 900 !important;
-        line-height: 1.05 !important;
-        box-shadow: 0 3px 8px rgba(15, 23, 42, 0.14) !important;
-        position: relative !important;
-        overflow: hidden !important;
+        min-height: 58px !important; border-radius: 14px !important; border-style: dashed !important; border-width: 1.8px !important;
+        font-weight: 900 !important; line-height: 1.05 !important; position: relative !important; overflow: hidden !important;
     }
-    div[class*="st-key-btn_"] button:hover {
-        transform: translateY(-2px) scale(1.025) !important;
-        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.20) !important;
-    }
-    """
-    estilos_boletos.append(estilos_base)
-
+    div[class*="st-key-btn_"] button:hover { transform: translateY(-2px) scale(1.025) !important; box-shadow: 0 8px 18px rgba(15, 23, 42, 0.20) !important; }
+    </style>
+    """]
     for num, estado in estados_pantalla.items():
         clase = f"st-key-btn_{num}"
-
         if estado == "vendido_db":
-            fondo = "linear-gradient(145deg, #FECACA, #FEF2F2)"
-            borde = "#EF4444"
-            color = "#7F1D1D"
+            fondo, borde, color = "linear-gradient(145deg, #FECACA, #FEF2F2)", "#EF4444", "#7F1D1D"
         elif estado == "reservado_db":
-            fondo = "linear-gradient(145deg, #FED7AA, #FFF7ED)"
-            borde = "#F59E0B"
-            color = "#7C2D12"
+            fondo, borde, color = "linear-gradient(145deg, #FED7AA, #FFF7ED)", "#F59E0B", "#7C2D12"
         elif estado == "pre_reservado_otros":
-            fondo = "linear-gradient(145deg, #E2E8F0, #F8FAFC)"
-            borde = "#64748B"
-            color = "#334155"
+            fondo, borde, color = "linear-gradient(145deg, #E2E8F0, #F8FAFC)", "#64748B", "#334155"
         elif estado == "pre_reservado_mio" or num in st.session_state.selected_tickets:
-            fondo = "linear-gradient(145deg, #BAE6FD, #E0F2FE)"
-            borde = "#0284C7"
-            color = "#0A2540"
+            fondo, borde, color = "linear-gradient(145deg, #BAE6FD, #E0F2FE)", "#0284C7", "#0A2540"
         else:
-            fondo = "linear-gradient(145deg, #D1FAE5, #F0FDF4)"
-            borde = "#10B981"
-            color = "#064E3B"
-
-        estilos_boletos.append(f"""
-        .{clase} button {{
-            background: {fondo} !important;
-            border-color: {borde} !important;
-            color: {color} !important;
-        }}
-        .{clase} button::before,
-        .{clase} button::after {{
-            content: none !important;
-            display: none !important;
-        }}
-        """)
-
-    estilos_boletos.append("</style>")
-    st.markdown("\n".join(estilos_boletos), unsafe_allow_html=True)
+            fondo, borde, color = "linear-gradient(145deg, #D1FAE5, #F0FDF4)", "#10B981", "#064E3B"
+        estilos.append(f"<style>.{clase} button {{background:{fondo} !important; border-color:{borde} !important; color:{color} !important;}}</style>")
+    st.markdown("\n".join(estilos), unsafe_allow_html=True)
 
     for fila in range(10):
         cols = st.columns(10)
-
         for col_idx in range(10):
             num = f"{(fila * 10 + col_idx):03d}"
             estado = estados_pantalla[num]
-
             with cols[col_idx]:
                 if estado == "vendido_db":
                     st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Vendido")
-
                 elif estado == "reservado_db":
                     st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Reservado / validando pago")
-
                 elif estado == "pre_reservado_otros":
                     st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="En carrito de otro usuario")
-
                 else:
                     seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
                     etiqueta = f"🎟️\n{num}"
-
                     if st.button(etiqueta, key=f"btn_{num}", type="secondary"):
                         if seleccionado:
                             pre_reservas.pop(num, None)
                             if num in st.session_state.selected_tickets:
                                 st.session_state.selected_tickets.remove(num)
                         else:
-                            pre_reservas[num] = {
-                                "session_id": mi_sesion,
-                                "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)
-                            }
+                            pre_reservas[num] = {"session_id": mi_sesion, "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)}
                             if num not in st.session_state.selected_tickets:
                                 st.session_state.selected_tickets.append(num)
                         st.rerun()
+
 
 def procesar_retorno_pago(conn: GSheetsConnection):
     qp = st.query_params
@@ -1235,6 +951,7 @@ def main():
     procesar_retorno_pago(conn)
     st.title("🎟️ Plataforma de Boletos - Gran Rifa")
     tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🎫 Buscar mis Boletos / Verificar Pago"])
+
     with tab2:
         st.markdown("### 🎫 Consulta tus boletos")
         c1, c2 = st.columns(2)
@@ -1254,6 +971,7 @@ def main():
                     else:
                         st.error("No encontramos boletos pagados con esos datos. Verifica correo y boleto o intenta nuevamente en unos segundos.")
                         mostrar_diagnostico_pagos()
+
     with tab1:
         if st.session_state.get("boletos_confirmados"):
             st.balloons()
@@ -1267,6 +985,7 @@ def main():
                 limpiar_carrito_local()
                 st.rerun()
             st.stop()
+
         col_mapa, col_form = st.columns([1.5, 1], gap="large")
         with col_mapa:
             st.subheader("🎫 Mapa de Disponibilidad")
@@ -1313,10 +1032,7 @@ def main():
                             correo_usuario = st.text_input("Correo (sin @):", placeholder="ej. juanperez")
                         with col_dom:
                             dominio = st.selectbox("Extension:", ["@gmail.com", "@hotmail.com", "@outlook.com", "@yahoo.com", "Otro..."])
-                        if dominio == "Otro...":
-                            correo = st.text_input("Correo completo:", placeholder="usuario@empresa.com")
-                        else:
-                            correo = f"{correo_usuario.replace('@', '').strip()}{dominio}" if correo_usuario else ""
+                        correo = st.text_input("Correo completo:", placeholder="usuario@empresa.com") if dominio == "Otro..." else (f"{correo_usuario.replace('@', '').strip()}{dominio}" if correo_usuario else "")
                         telefono = st.text_input("WhatsApp (10 digitos):", max_chars=10)
                         st.write(f"**💰 Total a Pagar:** ${total_pagar:.2f} MXN")
                         if st.button("🔴 Confirmar y Elegir Metodo de Pago", type="primary", use_container_width=True, key="btn_confirmar_metodo_pago"):
