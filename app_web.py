@@ -32,6 +32,7 @@ except Exception:
 # ============================================================
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
+CLIENT_ID_PARAM = "cid"
 TOTAL_BOLETOS = 100
 PRECIO_BOLETO = 15.00
 NOMBRE_EVENTO = "Gran Rifa"
@@ -208,6 +209,54 @@ def qp_get(qp: Any, nombre: str, default: str = "") -> str:
         return str(valor[0]) if isinstance(valor, list) and valor else str(valor)
     except Exception:
         return default
+
+
+
+def obtener_client_id_url() -> str:
+    """Recupera el identificador estable del carrito desde la URL."""
+    try:
+        valor = st.query_params.get(CLIENT_ID_PARAM, "")
+        if isinstance(valor, list):
+            valor = valor[0] if valor else ""
+        return limpiar_valor_id(valor)
+    except Exception:
+        return ""
+
+
+def asegurar_client_id_en_url() -> str:
+    """Mantiene el mismo carrito aunque el usuario regrese desde pago en otra pestaña."""
+    cid_url = obtener_client_id_url()
+    if cid_url:
+        st.session_state.session_id = cid_url
+        return cid_url
+
+    cid_actual = limpiar_valor_id(st.session_state.get("session_id", "")) or str(uuid.uuid4())
+    st.session_state.session_id = cid_actual
+    try:
+        st.query_params[CLIENT_ID_PARAM] = cid_actual
+    except Exception:
+        pass
+    return cid_actual
+
+
+def parametros_retorno_pago(extra: Dict[str, str]) -> Dict[str, str]:
+    """Agrega el identificador del carrito a las URLs de retorno de pago."""
+    params = dict(extra or {})
+    cid = limpiar_valor_id(st.session_state.get("session_id", "")) or obtener_client_id_url()
+    if cid:
+        params[CLIENT_ID_PARAM] = cid
+    return params
+
+
+def limpiar_query_manteniendo_cid():
+    """Limpia parametros de pago sin perder el carrito actual."""
+    cid = limpiar_valor_id(st.session_state.get("session_id", "")) or obtener_client_id_url()
+    try:
+        limpiar_query_manteniendo_cid()
+        if cid:
+            st.query_params[CLIENT_ID_PARAM] = cid
+    except Exception:
+        pass
 
 
 def safe_to_dict(obj: Any) -> Dict[str, Any]:
@@ -957,9 +1006,9 @@ def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_
         data["notification_url"] = MP_NOTIFICATION_URL
     if base:
         data["back_urls"] = {
-            "success": agregar_parametros_url(base, {"mp_return": "success", "external_reference": external_reference}),
-            "pending": agregar_parametros_url(base, {"mp_return": "pending", "external_reference": external_reference}),
-            "failure": agregar_parametros_url(base, {"mp_return": "failure", "external_reference": external_reference})
+            "success": agregar_parametros_url(base, parametros_retorno_pago({"mp_return": "success", "external_reference": external_reference})),
+            "pending": agregar_parametros_url(base, parametros_retorno_pago({"mp_return": "pending", "external_reference": external_reference})),
+            "failure": agregar_parametros_url(base, parametros_retorno_pago({"mp_return": "failure", "external_reference": external_reference}))
         }
         data["auto_return"] = "approved"
     pref = sdk.preference().create(data).get("response", {})
@@ -996,8 +1045,8 @@ def crear_sesion_stripe(nombre, apellidos, correo, numeros_boletos, monto_unitar
         }],
         metadata={"external_reference": external_reference, "boletos": boletos, "nombre_cliente": f"{nombre.strip()} {apellidos.strip()}"[:500]},
         payment_intent_data={"metadata": {"external_reference": external_reference}},
-        success_url=agregar_parametros_url(base, {"stripe_session_id": "{CHECKOUT_SESSION_ID}", "external_reference": external_reference}),
-        cancel_url=agregar_parametros_url(base, {"stripe_cancelled": "true", "external_reference": external_reference})
+        success_url=agregar_parametros_url(base, parametros_retorno_pago({"stripe_session_id": "{CHECKOUT_SESSION_ID}", "external_reference": external_reference})),
+        cancel_url=agregar_parametros_url(base, parametros_retorno_pago({"stripe_cancelled": "true", "external_reference": external_reference}))
     )
     return str(session.id), str(session.url)
 
@@ -1092,6 +1141,7 @@ def obtener_estado_boletos_bd(df_ventas, df_reservas):
 
 
 def renderizar_mapa_interactivo():
+    asegurar_client_id_en_url()
     mi_sesion = st.session_state.session_id
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
@@ -1205,7 +1255,7 @@ def procesar_retorno_pago(conn):
     if mp_return == "failure" or mp_status in ["rejected", "cancelled", "canceled", "failure", "failed"]:
         liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_MERCADO_PAGO")
         limpiar_carrito_local()
-        st.query_params.clear()
+        limpiar_query_manteniendo_cid()
         st.warning("Pago cancelado o rechazado. La reserva fue liberada.")
         st.rerun()
 
@@ -1226,13 +1276,13 @@ def procesar_retorno_pago(conn):
             st.session_state.payment_success_id = "PAGO_CONFIRMADO"
             limpiar_carrito_local()
             st.session_state.boletos_confirmados = datos
-            st.query_params.clear()
+            limpiar_query_manteniendo_cid()
             st.rerun()
 
     if "stripe_cancelled" in qp:
         liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_STRIPE")
         limpiar_carrito_local()
-        st.query_params.clear()
+        limpiar_query_manteniendo_cid()
         st.warning("Pago cancelado o rechazado. La reserva fue liberada.")
         st.rerun()
 
@@ -1245,7 +1295,7 @@ def procesar_retorno_pago(conn):
             st.session_state.payment_success_id = "PAGO_CONFIRMADO"
             limpiar_carrito_local()
             st.session_state.boletos_confirmados = datos
-            st.query_params.clear()
+            limpiar_query_manteniendo_cid()
             st.rerun()
 
 
@@ -1266,6 +1316,7 @@ def inicializar_estado():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+    asegurar_client_id_en_url()
 
 
 def mostrar_diagnostico_pagos():
@@ -1374,6 +1425,7 @@ def main():
                             elif not (telefono.isdigit() and len(telefono) == 10):
                                 st.error("El numero debe contener 10 digitos numericos.")
                             else:
+                                asegurar_client_id_en_url()
                                 ref = f"RIFA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000,9999)}"
                                 st.session_state.external_ref_activa = ref
                                 ordenes = []
