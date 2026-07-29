@@ -1223,51 +1223,98 @@ def mostrar_diagnostico_pagos():
 
 
 def renderizar_checkout_pendiente(conn: GSheetsConnection):
-    checkout = st.session_state.checkout_pendiente
+    checkout = st.session_state.get("checkout_pendiente")
+    if not isinstance(checkout, dict) or not checkout.get("external_reference"):
+        limpiar_checkout_pendiente()
+        st.warning("La reserva temporal no esta disponible. Selecciona tus boletos nuevamente.")
+        return
+
     boletos_checkout = checkout.get("boletos", [])
+    if not boletos_checkout:
+        limpiar_checkout_pendiente()
+        st.warning("La reserva no contiene boletos. Selecciona tus boletos nuevamente.")
+        return
+
     total_checkout = float(checkout.get("total", 0) or 0)
+    ref_checkout = checkout.get("external_reference", "")
+
     st.success(f"✅ Reserva lista para pago: {', '.join(boletos_checkout)}")
     st.write(f"### 💰 Total a pagar: ${total_checkout:.2f} MXN")
-    proveedor = st.radio("💳 Elige tu metodo de pago seguro:", ["Mercado Pago", "Stripe"], horizontal=True, key="checkout_proveedor")
-    if st.button("🚀 Generar enlace de pago", type="primary", use_container_width=True, key="btn_generar_link_pago"):
-        errores = []
-        ref_checkout = checkout.get("external_reference", "")
-        pref_id = init_point = sid = surl = ""
-        with st.spinner("Generando enlace de pago seguro..."):
-            if proveedor == "Mercado Pago":
-                try:
-                    pref_id, init_point = crear_preferencia_mercado_pago(checkout.get("nombre", ""), checkout.get("apellidos", ""), checkout.get("correo", ""), checkout.get("telefono", ""), boletos_checkout, PRECIO_BOLETO, ref_checkout)
-                except Exception as e:
-                    errores.append(f"Mercado Pago: {e}")
-                if init_point:
-                    st.session_state.pago_generado_url = init_point
-                    st.session_state.stripe_pago_url = None
-                    ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, pref_id, "")
-                    if not ok:
-                        st.warning(msg)
-                else:
-                    st.error("No fue posible generar el enlace de Mercado Pago. " + " | ".join(errores))
-            else:
-                try:
-                    sid, surl = crear_sesion_stripe(checkout.get("nombre", ""), checkout.get("apellidos", ""), checkout.get("correo", ""), boletos_checkout, PRECIO_BOLETO, ref_checkout)
-                except Exception as e:
-                    errores.append(f"Stripe: {e}")
-                if surl:
-                    st.session_state.stripe_session_id = sid
-                    st.session_state.stripe_pago_url = surl
-                    st.session_state.pago_generado_url = None
-                    ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, "", sid)
-                    if not ok:
-                        st.warning(msg)
-                else:
-                    st.error("No fue posible generar el enlace de Stripe. " + " | ".join(errores))
-        st.rerun()
-    if st.session_state.get("pago_generado_url"):
-        st.link_button("💙 Pagar en Mercado Pago", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
-    if st.session_state.get("stripe_pago_url"):
-        st.link_button("💳 Pagar con Stripe", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
+    st.caption("Elige una opcion. Solo se genera el enlace del metodo seleccionado para mantener el flujo rapido.")
+
+    col_mp, col_st = st.columns(2)
+
+    with col_mp:
+        st.markdown("#### 💙 Mercado Pago")
+        if st.session_state.get("pago_generado_url"):
+            st.link_button("💙 Entrar a Mercado Pago", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
+        else:
+            if st.button("💙 Elegir Mercado Pago", use_container_width=True, key="btn_elegir_mp"):
+                errores = []
+                with st.spinner("Generando enlace de Mercado Pago..."):
+                    try:
+                        pref_id, init_point = crear_preferencia_mercado_pago(
+                            checkout.get("nombre", ""),
+                            checkout.get("apellidos", ""),
+                            checkout.get("correo", ""),
+                            checkout.get("telefono", ""),
+                            boletos_checkout,
+                            PRECIO_BOLETO,
+                            ref_checkout
+                        )
+                    except Exception as e:
+                        pref_id, init_point = "", ""
+                        errores.append(f"Mercado Pago: {e}")
+
+                    if init_point:
+                        st.session_state.pago_generado_url = init_point
+                        st.session_state.stripe_pago_url = None
+                        st.session_state.stripe_session_id = None
+                        ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, pref_id, "")
+                        if not ok:
+                            st.warning(msg)
+                        st.success("Enlace de Mercado Pago listo. Presiona el boton para entrar.")
+                    else:
+                        st.error("No fue posible generar el enlace de Mercado Pago. " + " | ".join(errores))
+                if st.session_state.get("pago_generado_url"):
+                    st.link_button("💙 Entrar a Mercado Pago", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
+
+    with col_st:
+        st.markdown("#### 💳 Stripe")
+        if st.session_state.get("stripe_pago_url"):
+            st.link_button("💳 Entrar a Stripe", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
+        else:
+            if st.button("💳 Elegir Stripe", use_container_width=True, key="btn_elegir_stripe"):
+                errores = []
+                with st.spinner("Generando enlace de Stripe..."):
+                    try:
+                        sid, surl = crear_sesion_stripe(
+                            checkout.get("nombre", ""),
+                            checkout.get("apellidos", ""),
+                            checkout.get("correo", ""),
+                            boletos_checkout,
+                            PRECIO_BOLETO,
+                            ref_checkout
+                        )
+                    except Exception as e:
+                        sid, surl = "", ""
+                        errores.append(f"Stripe: {e}")
+
+                    if surl:
+                        st.session_state.stripe_session_id = sid
+                        st.session_state.stripe_pago_url = surl
+                        st.session_state.pago_generado_url = None
+                        ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, "", sid)
+                        if not ok:
+                            st.warning(msg)
+                        st.success("Enlace de Stripe listo. Presiona el boton para entrar.")
+                    else:
+                        st.error("No fue posible generar el enlace de Stripe. " + " | ".join(errores))
+                if st.session_state.get("stripe_pago_url"):
+                    st.link_button("💳 Entrar a Stripe", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
+
+    st.divider()
     if st.button("🧹 Cancelar reserva y vaciar carrito", use_container_width=True, key="btn_cancelar_checkout_pendiente"):
-        ref_checkout = checkout.get("external_reference", "")
         if ref_checkout:
             liberar_reserva_por_rechazo_o_cancelacion(conn, ref_checkout, "CANCELADO_USUARIO")
         limpiar_carrito_local()
@@ -1323,8 +1370,7 @@ def main():
             if st.button("🧹 Limpiar resultado de consulta", use_container_width=True):
                 st.session_state.consulta_resultados = []
                 st.session_state.consulta_status = ""
-                st.session_state["buscar_numero_boleto"] = ""
-                st.session_state["buscar_correo_boleto"] = ""
+                st.session_state.limpiar_consulta_campos = True
                 st.rerun()
     with tab1:
         if st.session_state.get("boletos_confirmados"):
@@ -1345,11 +1391,11 @@ def main():
             st.subheader("🧾 Finalizar Compra")
             boletos = st.session_state.selected_tickets
             with st.container(border=True):
-                if not boletos and not hay_checkout_pendiente():
+                if hay_checkout_pendiente():
+                    renderizar_checkout_pendiente(conn)
+                elif not boletos:
                     st.info("🟢 Selecciona uno o mas boletos disponibles.")
                     limpiar_enlaces_pago_sin_vaciar_carrito()
-                elif hay_checkout_pendiente():
-                    renderizar_checkout_pendiente(conn)
                 else:
                     total_pagar = PRECIO_BOLETO * len(boletos)
                     st.success(f"🎟️ En tu carrito: {', '.join(boletos)}")
