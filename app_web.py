@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_gsheets import GSheetsConnection
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -244,6 +245,23 @@ def limpiar_query_manteniendo_cid():
             st.query_params[CLIENT_ID_PARAM] = cid
     except Exception:
         pass
+
+
+
+def redirigir_a_url(url: str):
+    """Redirige al proveedor de pago en la misma pestaña y deja un boton de respaldo."""
+    url = normalizar_url(url)
+    if not url:
+        return
+    components.html(
+        f"""
+        <script>
+            window.parent.location.href = {url!r};
+        </script>
+        <p style="font-family:Arial; font-size:14px;">Redirigiendo al pago seguro...</p>
+        """,
+        height=40,
+    )
 
 
 def normalizar_fecha_unix(fecha_txt: str, dias_antes: int = 5, dias_despues: int = 5) -> dict:
@@ -1313,26 +1331,111 @@ def mostrar_diagnostico_pagos():
             st.json({"MP_ACCESS_TOKEN_configurado": bool(MP_ACCESS_TOKEN), "STRIPE_SECRET_KEY_configurado": bool(STRIPE_SECRET_KEY), "ultimo_error_pago": st.session_state.get("ultimo_error_pago", "")})
 
 
+
+def sincronizar_checkout_con_seleccion_local():
+    """Permite agregar mas boletos al checkout usando los datos ya capturados."""
+    checkout = st.session_state.get("checkout_pendiente")
+    if not isinstance(checkout, dict):
+        return
+
+    boletos_actuales = [parse_ticket_number(b) for b in checkout.get("boletos", []) if parse_ticket_number(b)]
+    seleccionados = [parse_ticket_number(b) for b in st.session_state.get("selected_tickets", []) if parse_ticket_number(b)]
+    union = []
+    for boleto in boletos_actuales + seleccionados:
+        if boleto and boleto not in union:
+            union.append(boleto)
+
+    if union != boletos_actuales:
+        checkout["boletos"] = union
+        checkout["total"] = float(PRECIO_BOLETO) * len(union)
+        st.session_state.checkout_pendiente = checkout
+
+
+def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[bool, str]:
+    """Antes de pagar, agrega a Reservas los boletos nuevos añadidos al checkout."""
+    checkout = st.session_state.get("checkout_pendiente")
+    if not isinstance(checkout, dict):
+        return False, "No existe checkout pendiente."
+
+    ref = limpiar_valor_id(checkout.get("external_reference", ""))
+    boletos_checkout = [parse_ticket_number(b) for b in checkout.get("boletos", []) if parse_ticket_number(b)]
+    if not ref or not boletos_checkout:
+        return False, "La reserva no contiene referencia o boletos."
+
+    df_r = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
+    if obtener_error_lectura_sheets():
+        return False, obtener_error_lectura_sheets()
+    df_v = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
+    if obtener_error_lectura_sheets():
+        return False, obtener_error_lectura_sheets()
+
+    ya_reservados_ref = []
+    if not df_r.empty:
+        ya_reservados_ref = df_r[df_r["External_Reference"].astype(str) == ref]["Numero_Boleto"].astype(str).apply(parse_ticket_number).tolist()
+
+    boletos_nuevos = [b for b in boletos_checkout if b not in ya_reservados_ref]
+    if not boletos_nuevos:
+        return True, "Reserva sincronizada."
+
+    disponible, mensaje = boletos_disponibles_para_reservar(boletos_nuevos, df_v, df_r, external_reference_actual=ref)
+    if not disponible:
+        return False, mensaje
+
+    nombre_completo = f"{checkout.get('nombre', '').strip()} {checkout.get('apellidos', '').strip()}".strip()
+    correo = str(checkout.get("correo", "")).strip().lower()
+    telefono = str(checkout.get("telefono", "")).strip()
+    ahora_txt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    expira_txt = (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S")
+
+    nuevas = []
+    for boleto in boletos_nuevos:
+        nuevas.append({
+            "External_Reference": ref,
+            "MercadoPago_Preference_ID": "",
+            "MercadoPago_Payment_ID": "",
+            "Stripe_Session_ID": "",
+            "Stripe_Payment_ID": "",
+            "Numero_Boleto": boleto,
+            "Nombre": nombre_completo,
+            "Correo": correo,
+            "Numero_Telefonico": telefono,
+            "Monto": float(PRECIO_BOLETO),
+            "Estado_Reserva": "PENDIENTE",
+            "Fecha_Creacion": ahora_txt,
+            "Expira_En": expira_txt,
+            "Fecha_Actualizacion": ahora_txt
+        })
+
+    df_final = pd.concat([df_r.dropna(how="all"), preparar_dataframe_para_update(pd.DataFrame(nuevas), columnas_reservas())], ignore_index=True)
+    conn.update(worksheet="Reservas", data=preparar_dataframe_para_update(df_final, columnas_reservas()))
+    return True, "Reserva actualizada con boletos adicionales."
+
+
 def renderizar_checkout_pendiente(conn: GSheetsConnection):
+    sincronizar_checkout_con_seleccion_local()
     checkout = st.session_state.get("checkout_pendiente")
     if not isinstance(checkout, dict) or not checkout.get("external_reference"):
         limpiar_checkout_pendiente()
         st.warning("La reserva temporal no esta disponible. Selecciona tus boletos nuevamente.")
         return
 
-    boletos_checkout = checkout.get("boletos", [])
+    boletos_checkout = [parse_ticket_number(b) for b in checkout.get("boletos", []) if parse_ticket_number(b)]
     if not boletos_checkout:
         limpiar_checkout_pendiente()
         st.warning("La reserva no contiene boletos. Selecciona tus boletos nuevamente.")
         return
 
-    total_checkout = float(checkout.get("total", 0) or 0)
+    total_checkout = float(PRECIO_BOLETO) * len(boletos_checkout)
+    checkout["boletos"] = boletos_checkout
+    checkout["total"] = total_checkout
+    st.session_state.checkout_pendiente = checkout
+
     ref_checkout = checkout.get("external_reference", "")
     metodo = st.session_state.get("checkout_metodo_elegido", "")
 
     st.success(f"✅ Reserva lista para pago: {', '.join(boletos_checkout)}")
     st.write(f"### 💰 Total a pagar: ${total_checkout:.2f} MXN")
-    st.caption("Selecciona un metodo de pago y despues presiona Aceptar para generar el enlace.")
+    st.caption("Puedes seguir seleccionando boletos en el mapa y se agregaran a esta misma reserva con los datos ya capturados.")
 
     st.markdown(f"""
     <style>
@@ -1346,7 +1449,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
         font-weight:950!important; background:{'linear-gradient(145deg,#2563EB,#1E3A8A)' if metodo == 'Stripe' else 'linear-gradient(145deg,#DBEAFE,#EFF6FF)'}!important;
         border-color:{'#1E3A8A' if metodo == 'Stripe' else '#2563EB'}!important; color:{'#FFFFFF' if metodo == 'Stripe' else '#1E3A8A'}!important;
     }}
-    .st-key-btn_aceptar_pago button {{
+    .st-key-btn_realizar_pago_directo button {{
         min-height:58px!important; border-radius:14px!important; font-weight:950!important;
         background:linear-gradient(135deg,#DC2626,#7F1D1D)!important; color:#FFFFFF!important; border:0!important;
         box-shadow:0 7px 18px rgba(220,38,38,.36)!important;
@@ -1363,52 +1466,72 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
     if metodo:
         st.info(f"Metodo seleccionado: {metodo}")
     else:
-        st.warning("Selecciona un metodo de pago para activar el boton Aceptar.")
+        st.warning("Selecciona un metodo de pago para activar Realizar pago.")
 
-    aceptar = st.button("✅ Aceptar y generar enlace", type="primary", use_container_width=True, key="btn_aceptar_pago", disabled=not bool(metodo))
-    if aceptar:
+    if st.button("✅ Realizar pago", type="primary", use_container_width=True, key="btn_realizar_pago_directo", disabled=not bool(metodo)):
+        ok_sync, msg_sync = sincronizar_reserva_checkout_en_sheets(conn)
+        if not ok_sync:
+            st.error(f"No fue posible actualizar la reserva antes del pago: {msg_sync}")
+            return
+
+        # Releer el checkout por si se agregaron boletos justo antes de pagar.
+        checkout = st.session_state.get("checkout_pendiente", {})
+        boletos_checkout = [parse_ticket_number(b) for b in checkout.get("boletos", []) if parse_ticket_number(b)]
         errores = []
-        pref_id = init_point = sid = surl = ""
-        with st.spinner(f"Generando enlace de {metodo}..."):
+        url_pago = ""
+
+        with st.spinner(f"Preparando {metodo}..."):
             if metodo == "Mercado Pago":
                 try:
                     pref_id, init_point = crear_preferencia_mercado_pago(
-                        checkout.get("nombre", ""), checkout.get("apellidos", ""), checkout.get("correo", ""),
-                        checkout.get("telefono", ""), boletos_checkout, PRECIO_BOLETO, ref_checkout
+                        checkout.get("nombre", ""),
+                        checkout.get("apellidos", ""),
+                        checkout.get("correo", ""),
+                        checkout.get("telefono", ""),
+                        boletos_checkout,
+                        PRECIO_BOLETO,
+                        ref_checkout
                     )
                 except Exception as e:
+                    pref_id, init_point = "", ""
                     errores.append(f"Mercado Pago: {e}")
+
                 if init_point:
                     st.session_state.pago_generado_url = init_point
                     st.session_state.stripe_pago_url = None
                     st.session_state.stripe_session_id = None
-                    ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, pref_id, "")
-                    if not ok:
-                        st.warning(msg)
+                    actualizar_ids_proveedores_reserva(conn, ref_checkout, pref_id, "")
+                    url_pago = init_point
                 else:
-                    st.error("No fue posible generar el enlace de Mercado Pago. " + " | ".join(errores))
+                    st.error("No fue posible preparar Mercado Pago. " + " | ".join(errores))
+
             elif metodo == "Stripe":
                 try:
                     sid, surl = crear_sesion_stripe(
-                        checkout.get("nombre", ""), checkout.get("apellidos", ""), checkout.get("correo", ""),
-                        boletos_checkout, PRECIO_BOLETO, ref_checkout
+                        checkout.get("nombre", ""),
+                        checkout.get("apellidos", ""),
+                        checkout.get("correo", ""),
+                        boletos_checkout,
+                        PRECIO_BOLETO,
+                        ref_checkout
                     )
                 except Exception as e:
+                    sid, surl = "", ""
                     errores.append(f"Stripe: {e}")
+
                 if surl:
                     st.session_state.stripe_session_id = sid
                     st.session_state.stripe_pago_url = surl
                     st.session_state.pago_generado_url = None
-                    ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, "", sid)
-                    if not ok:
-                        st.warning(msg)
+                    actualizar_ids_proveedores_reserva(conn, ref_checkout, "", sid)
+                    url_pago = surl
                 else:
-                    st.error("No fue posible generar el enlace de Stripe. " + " | ".join(errores))
+                    st.error("No fue posible preparar Stripe. " + " | ".join(errores))
 
-    if st.session_state.get("pago_generado_url"):
-        st.link_button("💙 Entrar a Mercado Pago", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
-    if st.session_state.get("stripe_pago_url"):
-        st.link_button("💳 Entrar a Stripe", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
+        if url_pago:
+            st.success("Redirigiendo al pago seguro...")
+            redirigir_a_url(url_pago)
+            st.link_button(f"Abrir {metodo}", url=url_pago, type="primary", use_container_width=True)
 
     st.divider()
     if st.button("🧹 Cancelar reserva y vaciar carrito", use_container_width=True, key="btn_cancelar_checkout_pendiente"):
