@@ -418,32 +418,61 @@ def hay_checkout_pendiente() -> bool:
 
 
 def restaurar_carrito_local_desde_reserva(conn: GSheetsConnection, external_reference: str) -> List[str]:
+    """Reconstruye carrito, checkout y datos capturados desde Reservas al volver sin pagar."""
     boletos_restaurados = []
     try:
         ext_ref = limpiar_valor_id(external_reference)
         if not ext_ref:
             return []
+
         df_r = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
         if obtener_error_lectura_sheets() or df_r.empty:
             return []
+
         grupo = df_r[df_r["External_Reference"].astype(str) == ext_ref]
         if grupo.empty:
             return []
+
         pre_reservas = obtener_pre_reservas_globales()
         limpiar_pre_reservas_expiradas(pre_reservas)
         mi_sesion = asegurar_client_id_en_url()
+
         for _, row in grupo.iterrows():
             boleto = parse_ticket_number(row.get("Numero_Boleto", ""))
             if not boleto:
                 continue
             if boleto not in boletos_restaurados:
                 boletos_restaurados.append(boleto)
-            pre_reservas[boleto] = {"session_id": mi_sesion, "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)}
+            pre_reservas[boleto] = {
+                "session_id": mi_sesion,
+                "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)
+            }
+
+        fila = grupo.iloc[0]
+        nombre_completo = limpiar_valor_id(fila.get("Nombre", ""))
+        partes_nombre = nombre_completo.split()
+        nombre = partes_nombre[0] if partes_nombre else ""
+        apellidos = " ".join(partes_nombre[1:]) if len(partes_nombre) > 1 else ""
+        correo = limpiar_valor_id(fila.get("Correo", ""))
+        telefono = limpiar_valor_id(fila.get("Numero_Telefonico", ""))
+
         st.session_state.selected_tickets = boletos_restaurados
+        st.session_state.external_ref_activa = ext_ref
+        st.session_state.checkout_pendiente = {
+            "external_reference": ext_ref,
+            "nombre": nombre,
+            "apellidos": apellidos,
+            "correo": correo,
+            "telefono": telefono,
+            "boletos": boletos_restaurados,
+            "total": float(PRECIO_BOLETO) * len(boletos_restaurados)
+        }
+        st.session_state.checkout_metodo_elegido = ""
         limpiar_enlaces_pago_sin_vaciar_carrito()
         return boletos_restaurados
     except Exception:
         return []
+
 
 # ============================================================
 # SHEETS
@@ -1168,7 +1197,17 @@ def renderizar_mapa_interactivo():
     if error_mapa:
         st.warning(error_mapa)
     estados_bd = obtener_estado_boletos_bd(df_v, df_r)
+    boletos_checkout_actual = set()
+    if isinstance(st.session_state.get("checkout_pendiente"), dict):
+        boletos_checkout_actual = set([
+            parse_ticket_number(b)
+            for b in st.session_state.checkout_pendiente.get("boletos", [])
+            if parse_ticket_number(b)
+        ])
+
     for boleto_estado_bd in list(estados_bd.keys()):
+        if boleto_estado_bd in boletos_checkout_actual:
+            continue
         if boleto_estado_bd in pre_reservas:
             pre_reservas.pop(boleto_estado_bd, None)
         if boleto_estado_bd in st.session_state.selected_tickets:
@@ -1243,10 +1282,9 @@ def procesar_retorno_pago(conn):
     ext_ref = qp_get(qp, "external_reference", "") or st.session_state.get("external_ref_activa", "")
     if mp_return == "failure" or mp_status in ["rejected", "cancelled", "canceled", "failure", "failed"]:
         restaurar_carrito_local_desde_reserva(conn, ext_ref)
-        liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_MERCADO_PAGO")
-        limpiar_checkout_pendiente()
+        limpiar_enlaces_pago_sin_vaciar_carrito()
         limpiar_query_manteniendo_cid()
-        st.warning("Regresaste sin completar el pago. Conservamos tus boletos en el carrito para que puedas intentarlo nuevamente.")
+        st.warning("Regresaste sin completar el pago. Conservamos tus datos y boletos para que puedas intentarlo nuevamente.")
         st.rerun()
     if payment_id and mp_status == "approved":
         if confirmar_si_venta_ya_existe(conn, ext_ref):
@@ -1272,10 +1310,9 @@ def procesar_retorno_pago(conn):
             st.rerun()
     if "stripe_cancelled" in qp:
         restaurar_carrito_local_desde_reserva(conn, ext_ref)
-        liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_STRIPE")
-        limpiar_checkout_pendiente()
+        limpiar_enlaces_pago_sin_vaciar_carrito()
         limpiar_query_manteniendo_cid()
-        st.warning("Regresaste sin completar el pago. Conservamos tus boletos en el carrito para que puedas intentarlo nuevamente.")
+        st.warning("Regresaste sin completar el pago. Conservamos tus datos y boletos para que puedas intentarlo nuevamente.")
         st.rerun()
     stripe_session_id = qp_get(qp, "stripe_session_id", "")
     if stripe_session_id:
@@ -1531,7 +1568,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
         if url_pago:
             st.success("Redirigiendo al pago seguro...")
             redirigir_a_url(url_pago)
-            st.link_button(f"Abrir {metodo}", url=url_pago, type="primary", use_container_width=True)
+            st.stop()
 
     st.divider()
     if st.button("🧹 Cancelar reserva y vaciar carrito", use_container_width=True, key="btn_cancelar_checkout_pendiente"):
