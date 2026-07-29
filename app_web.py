@@ -412,6 +412,37 @@ def leer_ventas(conn: GSheetsConnection) -> pd.DataFrame:
 # ROBUSTEZ: MONTO EXACTO, CONCURRENCIA E IDEMPOTENCIA
 # ============================================================
 
+
+def obtener_ventas_por_referencia(conn: GSheetsConnection, external_reference: str) -> List[Dict[str, Any]]:
+    """Consulta rapida en Sheets para evitar verificaciones lentas al regresar del proveedor de pago."""
+    try:
+        ref = limpiar_valor_id(external_reference)
+        if not ref:
+            return []
+        df_v = preparar_dataframe_para_update(leer_ventas(conn), columnas_ventas())
+        if df_v.empty:
+            return []
+        ventas = df_v[df_v["Referencia_Pago"].astype(str) == ref]
+        if ventas.empty:
+            return []
+        return ventas.to_dict(orient="records")
+    except Exception:
+        return []
+
+
+def confirmar_si_venta_ya_existe(conn: GSheetsConnection, external_reference: str) -> bool:
+    """Si el webhook ya registro la venta, evita llamadas lentas a Stripe o Mercado Pago."""
+    ventas = obtener_ventas_por_referencia(conn, external_reference)
+    if ventas:
+        st.session_state.boletos_confirmados = ventas
+        st.session_state.payment_success_id = "PAGO_CONFIRMADO"
+        limpiar_carrito_local()
+        st.session_state.boletos_confirmados = ventas
+        limpiar_query_manteniendo_cid()
+        return True
+    return False
+
+
 def obtener_external_reference_pago(payment_info: Dict[str, Any]) -> str:
     return limpiar_valor_id(payment_info.get("external_reference", ""))
 
@@ -1260,6 +1291,8 @@ def procesar_retorno_pago(conn):
         st.rerun()
 
     if payment_id and mp_status == "approved":
+        if confirmar_si_venta_ya_existe(conn, ext_ref):
+            st.rerun()
         pago = None
         try:
             respuesta = sdk.payment().get(payment_id).get("response", {}) if sdk else {}
@@ -1288,6 +1321,8 @@ def procesar_retorno_pago(conn):
 
     stripe_session_id = qp_get(qp, "stripe_session_id", "")
     if stripe_session_id:
+        if confirmar_si_venta_ya_existe(conn, ext_ref):
+            st.rerun()
         pago = obtener_pago_stripe(stripe_session_id, ext_ref if ext_ref else None)
         if pago:
             datos = actualizar_pago_en_hojas(conn, pago)
@@ -1311,7 +1346,10 @@ def inicializar_estado():
         "errores_proveedores": [],
         "ultimo_error_pago": "",
         "external_ref_activa": None,
-        "boletos_confirmados": []
+        "boletos_confirmados": [],
+        "consulta_resultados": [],
+        "consulta_status": "",
+        "limpiar_consulta_campos": False
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1341,22 +1379,63 @@ def main():
 
     with tab2:
         st.markdown("### 🎫 Consulta tus boletos")
+
+        if st.session_state.get("limpiar_consulta_campos"):
+            st.session_state["buscar_numero_boleto"] = ""
+            st.session_state["buscar_correo_boleto"] = ""
+            st.session_state.limpiar_consulta_campos = False
+
         c1, c2 = st.columns(2)
         with c1:
-            buscar_num = st.text_input(f"Numero de boleto (ej. {formatear_numero_boleto(min(5, TOTAL_BOLETOS - 1))}):")
+            st.text_input(
+                f"Numero de boleto (ej. {formatear_numero_boleto(min(5, TOTAL_BOLETOS - 1))}):",
+                key="buscar_numero_boleto"
+            )
         with c2:
-            buscar_correo = st.text_input("Correo asociado:")
+            st.text_input("Correo asociado:", key="buscar_correo_boleto")
+
         if st.button("🔴 Verificar Pago y Descargar PDF", type="primary", key="btn_verificar_pago_pdf"):
+            buscar_num = st.session_state.get("buscar_numero_boleto", "")
+            buscar_correo = st.session_state.get("buscar_correo_boleto", "")
+            st.session_state.consulta_resultados = []
+            st.session_state.consulta_status = ""
+
             if not buscar_num or not buscar_correo:
-                st.warning("Ingresa boleto y correo.")
+                st.session_state.consulta_status = "warning|Ingresa boleto y correo."
+                st.session_state.limpiar_consulta_campos = False
+                st.rerun()
             else:
-                datos = recuperar_boletos_por_reserva(conn, buscar_num, buscar_correo)
-                if datos:
-                    st.success("✅ Boletos encontrados. Puedes descargar tu PDF.")
-                    procesar_descarga_pdf(datos)
-                else:
-                    st.error("No encontramos boletos pagados con esos datos. Verifica correo y boleto o intenta nuevamente.")
-                    mostrar_diagnostico_pagos()
+                with st.spinner("Verificando pago y recuperando boletos..."):
+                    datos = recuperar_boletos_por_reserva(conn, buscar_num, buscar_correo)
+                    if datos:
+                        st.session_state.consulta_resultados = datos
+                        st.session_state.consulta_status = "success|Boletos encontrados. Puedes descargar tu PDF."
+                    else:
+                        st.session_state.consulta_status = "error|No encontramos boletos pagados con esos datos. Verifica correo y boleto o intenta nuevamente."
+                    st.session_state.limpiar_consulta_campos = True
+                    st.rerun()
+
+        status = st.session_state.get("consulta_status", "")
+        if status:
+            tipo, mensaje = status.split("|", 1) if "|" in status else ("info", status)
+            if tipo == "success":
+                st.success(f"✅ {mensaje}")
+            elif tipo == "warning":
+                st.warning(mensaje)
+            elif tipo == "error":
+                st.error(mensaje)
+                mostrar_diagnostico_pagos()
+            else:
+                st.info(mensaje)
+
+        if st.session_state.get("consulta_resultados"):
+            procesar_descarga_pdf(st.session_state.consulta_resultados)
+            if st.button("🧹 Limpiar resultado de consulta", use_container_width=True):
+                st.session_state.consulta_resultados = []
+                st.session_state.consulta_status = ""
+                st.session_state["buscar_numero_boleto"] = ""
+                st.session_state["buscar_correo_boleto"] = ""
+                st.rerun()
 
     with tab1:
         if st.session_state.get("boletos_confirmados"):
