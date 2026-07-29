@@ -3,6 +3,7 @@ import math
 import random
 import re
 import uuid
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
@@ -42,7 +43,7 @@ MENSAJE_GENERAL_BOLETO = (
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
 CLIENT_ID_PARAM = "cid"
-SHEETS_TTL_MAPA_SEGUNDOS = 12
+SHEETS_TTL_MAPA_SEGUNDOS = 25
 SHEETS_TTL_LECTURA_SEGUNDOS = 6
 
 DIGITOS_BOLETO = max(1, len(str(max(int(TOTAL_BOLETOS) - 1, 0))))
@@ -110,6 +111,38 @@ CSS_CUSTOM = """
     .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns:repeat({COLUMNAS_MAPA}, minmax(24px,1fr))!important; gap:3px!important; }
     .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height:40px!important; font-size:9px!important; padding:0!important; }
 }
+
+.st-key-btn_elegir_mp button,
+.st-key-btn_elegir_stripe button {
+    min-height: 64px !important;
+    border-radius: 16px !important;
+    border-width: 1.8px !important;
+    border-style: dashed !important;
+    font-weight: 950 !important;
+    letter-spacing: .2px !important;
+}
+.st-key-btn_elegir_mp button {
+    background: linear-gradient(145deg,#D1FAE5,#ECFDF5) !important;
+    border-color: #10B981 !important;
+    color: #064E3B !important;
+}
+.st-key-btn_elegir_stripe button {
+    background: linear-gradient(145deg,#DBEAFE,#EFF6FF) !important;
+    border-color: #2563EB !important;
+    color: #1E3A8A !important;
+}
+.st-key-btn_elegir_mp button:hover,
+.st-key-btn_elegir_stripe button:hover {
+    transform: translateY(-2px) scale(1.01) !important;
+    box-shadow: 0 10px 22px rgba(15,23,42,.18) !important;
+}
+.st-key-btn_cancelar_checkout_pendiente button {
+    background: linear-gradient(145deg,#F8FAFC,#E2E8F0) !important;
+    border-color: #94A3B8 !important;
+    color: #334155 !important;
+    border-style: dashed !important;
+}
+
 </style>
 """
 
@@ -310,6 +343,30 @@ def limpiar_enlaces_pago_sin_vaciar_carrito():
 def limpiar_checkout_pendiente():
     st.session_state.checkout_pendiente = None
     st.session_state.checkout_proveedor = "Mercado Pago"
+    st.session_state.checkout_metodo_elegido = ""
+
+
+
+def alternar_boleto_mapa(numero_boleto: str):
+    """Actualiza el carrito visual antes de renderizar, evitando un st.rerun extra por cada click."""
+    asegurar_client_id_en_url()
+    pre_reservas = obtener_pre_reservas_globales()
+    limpiar_pre_reservas_expiradas(pre_reservas)
+    mi_sesion = st.session_state.get("session_id", "")
+    numero_boleto = parse_ticket_number(numero_boleto)
+
+    if numero_boleto in pre_reservas and pre_reservas[numero_boleto].get("session_id") == mi_sesion:
+        pre_reservas.pop(numero_boleto, None)
+        if numero_boleto in st.session_state.selected_tickets:
+            st.session_state.selected_tickets.remove(numero_boleto)
+        return
+
+    pre_reservas[numero_boleto] = {
+        "session_id": mi_sesion,
+        "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)
+    }
+    if numero_boleto not in st.session_state.selected_tickets:
+        st.session_state.selected_tickets.append(numero_boleto)
 
 
 def limpiar_carrito_local():
@@ -1047,14 +1104,48 @@ def obtener_estado_boletos_bd(df_ventas, df_reservas):
     return estados
 
 
+
+def limpiar_cache_mapa():
+    st.session_state["_mapa_cache_ts"] = 0
+    st.session_state["_mapa_cache_ventas"] = pd.DataFrame(columns=columnas_ventas())
+    st.session_state["_mapa_cache_reservas"] = pd.DataFrame(columns=columnas_reservas())
+
+
+def obtener_datos_mapa_cache(conn: GSheetsConnection) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Evita releer Sheets en cada click del mapa; refresca solo por ventana corta o cuando no hay cache."""
+    ahora = time.time()
+    ts = float(st.session_state.get("_mapa_cache_ts", 0) or 0)
+    df_v_cache = st.session_state.get("_mapa_cache_ventas")
+    df_r_cache = st.session_state.get("_mapa_cache_reservas")
+
+    cache_valida = (
+        isinstance(df_v_cache, pd.DataFrame)
+        and isinstance(df_r_cache, pd.DataFrame)
+        and (ahora - ts) < SHEETS_TTL_MAPA_SEGUNDOS
+    )
+    if cache_valida:
+        return df_v_cache.copy(), df_r_cache.copy()
+
+    df_v = leer_ventas(conn, ttl_segundos=SHEETS_TTL_MAPA_SEGUNDOS)
+    df_r = leer_reservas(conn, ttl_segundos=SHEETS_TTL_MAPA_SEGUNDOS)
+    if not obtener_error_lectura_sheets():
+        st.session_state["_mapa_cache_ts"] = ahora
+        st.session_state["_mapa_cache_ventas"] = df_v.copy()
+        st.session_state["_mapa_cache_reservas"] = df_r.copy()
+    return df_v, df_r
+
+
+def seleccionar_metodo_pago_checkout(metodo: str):
+    st.session_state.checkout_metodo_elegido = metodo
+
+
 def renderizar_mapa_interactivo():
     asegurar_client_id_en_url()
     mi_sesion = st.session_state.session_id
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
     conn = st.connection("gsheets", type=GSheetsConnection)
-    df_v = leer_ventas(conn, ttl_segundos=SHEETS_TTL_MAPA_SEGUNDOS)
-    df_r = leer_reservas(conn, ttl_segundos=SHEETS_TTL_MAPA_SEGUNDOS)
+    df_v, df_r = obtener_datos_mapa_cache(conn)
     error_mapa = obtener_error_lectura_sheets()
     if error_mapa:
         st.warning(error_mapa)
@@ -1117,17 +1208,13 @@ def renderizar_mapa_interactivo():
                     if estado in ["vendido_db", "reservado_db", "pre_reservado_otros"]:
                         st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help=estado)
                     else:
-                        seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
-                        if st.button(f"🎟️\n{num}", key=f"btn_{num}", type="secondary"):
-                            if seleccionado:
-                                pre_reservas.pop(num, None)
-                                if num in st.session_state.selected_tickets:
-                                    st.session_state.selected_tickets.remove(num)
-                            else:
-                                pre_reservas[num] = {"session_id": mi_sesion, "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)}
-                                if num not in st.session_state.selected_tickets:
-                                    st.session_state.selected_tickets.append(num)
-                            st.rerun()
+                        st.button(
+                            f"🎟️\n{num}",
+                            key=f"btn_{num}",
+                            type="secondary",
+                            on_click=alternar_boleto_mapa,
+                            args=(num,)
+                        )
 
 
 def procesar_retorno_pago(conn):
@@ -1208,7 +1295,11 @@ def inicializar_estado():
         "consulta_status": "",
         "limpiar_consulta_campos": False,
         "checkout_pendiente": None,
-        "checkout_proveedor": "Mercado Pago"
+        "checkout_proveedor": "Mercado Pago",
+        "checkout_metodo_elegido": "",
+        "_mapa_cache_ts": 0,
+        "_mapa_cache_ventas": pd.DataFrame(columns=columnas_ventas()),
+        "_mapa_cache_reservas": pd.DataFrame(columns=columnas_reservas())
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1237,87 +1328,94 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
 
     total_checkout = float(checkout.get("total", 0) or 0)
     ref_checkout = checkout.get("external_reference", "")
+    metodo = st.session_state.get("checkout_metodo_elegido", "")
 
     st.success(f"✅ Reserva lista para pago: {', '.join(boletos_checkout)}")
     st.write(f"### 💰 Total a pagar: ${total_checkout:.2f} MXN")
-    st.caption("Elige una opcion. Solo se genera el enlace del metodo seleccionado para mantener el flujo rapido.")
+    st.caption("Selecciona un metodo de pago y despues presiona Aceptar para generar el enlace.")
+
+    st.markdown(f"""
+    <style>
+    .st-key-btn_pago_opcion_mp button {{
+        min-height:66px!important; border-radius:16px!important; border-style:dashed!important; border-width:2px!important;
+        font-weight:950!important; background:{'linear-gradient(145deg,#10B981,#065F46)' if metodo == 'Mercado Pago' else 'linear-gradient(145deg,#D1FAE5,#ECFDF5)'}!important;
+        border-color:{'#065F46' if metodo == 'Mercado Pago' else '#10B981'}!important; color:{'#FFFFFF' if metodo == 'Mercado Pago' else '#064E3B'}!important;
+    }}
+    .st-key-btn_pago_opcion_stripe button {{
+        min-height:66px!important; border-radius:16px!important; border-style:dashed!important; border-width:2px!important;
+        font-weight:950!important; background:{'linear-gradient(145deg,#2563EB,#1E3A8A)' if metodo == 'Stripe' else 'linear-gradient(145deg,#DBEAFE,#EFF6FF)'}!important;
+        border-color:{'#1E3A8A' if metodo == 'Stripe' else '#2563EB'}!important; color:{'#FFFFFF' if metodo == 'Stripe' else '#1E3A8A'}!important;
+    }}
+    .st-key-btn_aceptar_pago button {{
+        min-height:58px!important; border-radius:14px!important; font-weight:950!important;
+        background:linear-gradient(135deg,#DC2626,#7F1D1D)!important; color:#FFFFFF!important; border:0!important;
+        box-shadow:0 7px 18px rgba(220,38,38,.36)!important;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
 
     col_mp, col_st = st.columns(2)
-
     with col_mp:
-        st.markdown("#### 💙 Mercado Pago")
-        if st.session_state.get("pago_generado_url"):
-            st.link_button("💙 Entrar a Mercado Pago", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
-        else:
-            if st.button("💙 Elegir Mercado Pago", use_container_width=True, key="btn_elegir_mp"):
-                errores = []
-                with st.spinner("Generando enlace de Mercado Pago..."):
-                    try:
-                        pref_id, init_point = crear_preferencia_mercado_pago(
-                            checkout.get("nombre", ""),
-                            checkout.get("apellidos", ""),
-                            checkout.get("correo", ""),
-                            checkout.get("telefono", ""),
-                            boletos_checkout,
-                            PRECIO_BOLETO,
-                            ref_checkout
-                        )
-                    except Exception as e:
-                        pref_id, init_point = "", ""
-                        errores.append(f"Mercado Pago: {e}")
-
-                    if init_point:
-                        st.session_state.pago_generado_url = init_point
-                        st.session_state.stripe_pago_url = None
-                        st.session_state.stripe_session_id = None
-                        ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, pref_id, "")
-                        if not ok:
-                            st.warning(msg)
-                        st.success("Enlace de Mercado Pago listo. Presiona el boton para entrar.")
-                    else:
-                        st.error("No fue posible generar el enlace de Mercado Pago. " + " | ".join(errores))
-                if st.session_state.get("pago_generado_url"):
-                    st.link_button("💙 Entrar a Mercado Pago", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
-
+        st.button("🎟️ 💙 Mercado Pago", use_container_width=True, key="btn_pago_opcion_mp", on_click=seleccionar_metodo_pago_checkout, args=("Mercado Pago",))
     with col_st:
-        st.markdown("#### 💳 Stripe")
-        if st.session_state.get("stripe_pago_url"):
-            st.link_button("💳 Entrar a Stripe", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
-        else:
-            if st.button("💳 Elegir Stripe", use_container_width=True, key="btn_elegir_stripe"):
-                errores = []
-                with st.spinner("Generando enlace de Stripe..."):
-                    try:
-                        sid, surl = crear_sesion_stripe(
-                            checkout.get("nombre", ""),
-                            checkout.get("apellidos", ""),
-                            checkout.get("correo", ""),
-                            boletos_checkout,
-                            PRECIO_BOLETO,
-                            ref_checkout
-                        )
-                    except Exception as e:
-                        sid, surl = "", ""
-                        errores.append(f"Stripe: {e}")
+        st.button("🎟️ 💳 Stripe", use_container_width=True, key="btn_pago_opcion_stripe", on_click=seleccionar_metodo_pago_checkout, args=("Stripe",))
 
-                    if surl:
-                        st.session_state.stripe_session_id = sid
-                        st.session_state.stripe_pago_url = surl
-                        st.session_state.pago_generado_url = None
-                        ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, "", sid)
-                        if not ok:
-                            st.warning(msg)
-                        st.success("Enlace de Stripe listo. Presiona el boton para entrar.")
-                    else:
-                        st.error("No fue posible generar el enlace de Stripe. " + " | ".join(errores))
-                if st.session_state.get("stripe_pago_url"):
-                    st.link_button("💳 Entrar a Stripe", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
+    if metodo:
+        st.info(f"Metodo seleccionado: {metodo}")
+    else:
+        st.warning("Selecciona un metodo de pago para activar el boton Aceptar.")
+
+    aceptar = st.button("✅ Aceptar y generar enlace", type="primary", use_container_width=True, key="btn_aceptar_pago", disabled=not bool(metodo))
+    if aceptar:
+        errores = []
+        pref_id = init_point = sid = surl = ""
+        with st.spinner(f"Generando enlace de {metodo}..."):
+            if metodo == "Mercado Pago":
+                try:
+                    pref_id, init_point = crear_preferencia_mercado_pago(
+                        checkout.get("nombre", ""), checkout.get("apellidos", ""), checkout.get("correo", ""),
+                        checkout.get("telefono", ""), boletos_checkout, PRECIO_BOLETO, ref_checkout
+                    )
+                except Exception as e:
+                    errores.append(f"Mercado Pago: {e}")
+                if init_point:
+                    st.session_state.pago_generado_url = init_point
+                    st.session_state.stripe_pago_url = None
+                    st.session_state.stripe_session_id = None
+                    ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, pref_id, "")
+                    if not ok:
+                        st.warning(msg)
+                else:
+                    st.error("No fue posible generar el enlace de Mercado Pago. " + " | ".join(errores))
+            elif metodo == "Stripe":
+                try:
+                    sid, surl = crear_sesion_stripe(
+                        checkout.get("nombre", ""), checkout.get("apellidos", ""), checkout.get("correo", ""),
+                        boletos_checkout, PRECIO_BOLETO, ref_checkout
+                    )
+                except Exception as e:
+                    errores.append(f"Stripe: {e}")
+                if surl:
+                    st.session_state.stripe_session_id = sid
+                    st.session_state.stripe_pago_url = surl
+                    st.session_state.pago_generado_url = None
+                    ok, msg = actualizar_ids_proveedores_reserva(conn, ref_checkout, "", sid)
+                    if not ok:
+                        st.warning(msg)
+                else:
+                    st.error("No fue posible generar el enlace de Stripe. " + " | ".join(errores))
+
+    if st.session_state.get("pago_generado_url"):
+        st.link_button("💙 Entrar a Mercado Pago", url=st.session_state.pago_generado_url, type="primary", use_container_width=True)
+    if st.session_state.get("stripe_pago_url"):
+        st.link_button("💳 Entrar a Stripe", url=st.session_state.stripe_pago_url, type="primary", use_container_width=True)
 
     st.divider()
     if st.button("🧹 Cancelar reserva y vaciar carrito", use_container_width=True, key="btn_cancelar_checkout_pendiente"):
         if ref_checkout:
             liberar_reserva_por_rechazo_o_cancelacion(conn, ref_checkout, "CANCELADO_USUARIO")
         limpiar_carrito_local()
+        limpiar_cache_mapa()
         limpiar_query_manteniendo_cid()
         st.rerun()
 
@@ -1438,6 +1536,7 @@ def main():
                                 st.error(f"Error al registrar la reserva: {msg}")
                             else:
                                 guardar_checkout_pendiente(ref, nombre, apellidos, correo, telefono, boletos)
+                                limpiar_cache_mapa()
                                 st.success("Reserva creada correctamente. Ahora elige el metodo de pago.")
                                 st.rerun()
 
