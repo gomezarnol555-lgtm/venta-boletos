@@ -43,6 +43,8 @@ MENSAJE_GENERAL_BOLETO = (
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
 CLIENT_ID_PARAM = "cid"
+SHEETS_TTL_MAPA_SEGUNDOS = 12
+SHEETS_TTL_LECTURA_SEGUNDOS = 6
 
 DIGITOS_BOLETO = max(1, len(str(max(int(TOTAL_BOLETOS) - 1, 0))))
 COLUMNAS_MAPA = max(1, math.ceil(math.sqrt(max(int(TOTAL_BOLETOS), 1))))
@@ -298,7 +300,9 @@ def restaurar_carrito_local_desde_reserva(conn: GSheetsConnection, external_refe
         ext_ref = limpiar_valor_id(external_reference)
         if not ext_ref:
             return []
-        df_r = preparar_dataframe_para_update(leer_reservas(conn), columnas_reservas())
+        df_r = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
+        if obtener_error_lectura_sheets():
+            return []
         if df_r.empty:
             return []
         grupo = df_r[df_r["External_Reference"].astype(str) == ext_ref]
@@ -319,6 +323,31 @@ def restaurar_carrito_local_desde_reserva(conn: GSheetsConnection, external_refe
         return boletos_restaurados
     except Exception:
         return []
+
+
+def es_error_cuota_sheets(error: Exception) -> bool:
+    texto = str(error).lower()
+    return "quota exceeded" in texto or "rate_limit_exceeded" in texto or "resource_exhausted" in texto or "429" in texto
+
+
+def registrar_error_lectura_sheets(error: Exception, worksheet: str):
+    mensaje = str(error)
+    if es_error_cuota_sheets(error):
+        st.session_state["_sheet_read_error"] = (
+            f"Google Sheets alcanzo el limite temporal de lecturas al consultar '{worksheet}'. "
+            "Espera 60 segundos o intenta nuevamente."
+        )
+    else:
+        st.session_state["_sheet_read_error"] = f"Error leyendo hoja '{worksheet}': {mensaje}"
+
+
+def obtener_error_lectura_sheets() -> str:
+    return str(st.session_state.get("_sheet_read_error", "") or "")
+
+
+def limpiar_error_lectura_sheets():
+    st.session_state["_sheet_read_error"] = ""
+
 
 # ============================================================
 # SHEETS
@@ -350,18 +379,25 @@ def preparar_dataframe_para_update(df: pd.DataFrame, columnas: list) -> pd.DataF
     return df
 
 
-def leer_reservas(conn: GSheetsConnection) -> pd.DataFrame:
+def leer_reservas(conn: GSheetsConnection, ttl_segundos: int = SHEETS_TTL_LECTURA_SEGUNDOS) -> pd.DataFrame:
     try:
-        return asegurar_columnas(conn.read(worksheet="Reservas", ttl=0).dropna(how="all"), columnas_reservas())
-    except Exception:
+        df = conn.read(worksheet="Reservas", ttl=ttl_segundos).dropna(how="all")
+        limpiar_error_lectura_sheets()
+        return asegurar_columnas(df, columnas_reservas())
+    except Exception as e:
+        registrar_error_lectura_sheets(e, "Reservas")
         return pd.DataFrame(columns=columnas_reservas())
 
 
-def leer_ventas(conn: GSheetsConnection) -> pd.DataFrame:
+def leer_ventas(conn: GSheetsConnection, ttl_segundos: int = SHEETS_TTL_LECTURA_SEGUNDOS) -> pd.DataFrame:
     try:
-        return asegurar_columnas(conn.read(worksheet="Ventas", ttl=0).dropna(how="all"), columnas_ventas())
-    except Exception:
+        df = conn.read(worksheet="Ventas", ttl=ttl_segundos).dropna(how="all")
+        limpiar_error_lectura_sheets()
+        return asegurar_columnas(df, columnas_ventas())
+    except Exception as e:
+        registrar_error_lectura_sheets(e, "Ventas")
         return pd.DataFrame(columns=columnas_ventas())
+
 
 # ============================================================
 # ROBUSTEZ: MONTO, CONCURRENCIA E IDEMPOTENCIA
@@ -521,8 +557,14 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
         if not ordenes:
             return False, "No hay boletos para reservar."
         numeros_boletos = [parse_ticket_number(o.get("Numero_Boleto", "")) for o in ordenes]
-        df_v_actual = preparar_dataframe_para_update(leer_ventas(conn), columnas_ventas())
-        df_r_actual = preparar_dataframe_para_update(leer_reservas(conn), columnas_reservas())
+        df_v_actual = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
+        error_lectura = obtener_error_lectura_sheets()
+        if error_lectura:
+            return False, error_lectura
+        df_r_actual = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
+        error_lectura = obtener_error_lectura_sheets()
+        if error_lectura:
+            return False, error_lectura
         df_r_actual = liberar_reservas_previas_mismo_cliente(df_r_actual, ordenes)
         disponible, mensaje = boletos_disponibles_para_reservar(numeros_boletos, df_v_actual, df_r_actual)
         if not disponible:
@@ -576,8 +618,12 @@ def actualizar_pago_en_hojas(conn: GSheetsConnection, payment_info: Dict[str, An
     provider_session_id = obtener_provider_session_id_pago(payment_info)
     if not ext_ref:
         return []
-    df_r = preparar_dataframe_para_update(leer_reservas(conn), columnas_reservas())
-    df_v = preparar_dataframe_para_update(leer_ventas(conn), columnas_ventas())
+    df_r = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
+    if obtener_error_lectura_sheets():
+        return []
+    df_v = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
+    if obtener_error_lectura_sheets():
+        return []
     ventas_existentes = existe_pago_ya_procesado(df_v, payment_info)
     if not ventas_existentes.empty:
         return ventas_existentes.to_dict(orient="records")
@@ -954,7 +1000,9 @@ def obtener_ventas_por_referencia(conn: GSheetsConnection, external_reference: s
         ref = limpiar_valor_id(external_reference)
         if not ref:
             return []
-        df_v = preparar_dataframe_para_update(leer_ventas(conn), columnas_ventas())
+        df_v = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
+        if obtener_error_lectura_sheets():
+            return []
         ventas = df_v[df_v["Referencia_Pago"].astype(str) == ref]
         return ventas.to_dict(orient="records") if not ventas.empty else []
     except Exception:
@@ -1001,12 +1049,11 @@ def renderizar_mapa_interactivo():
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
     conn = st.connection("gsheets", type=GSheetsConnection)
-    try:
-        df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
-        df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
-    except Exception:
-        df_v = pd.DataFrame(columns=columnas_ventas())
-        df_r = pd.DataFrame(columns=columnas_reservas())
+    df_v = leer_ventas(conn, ttl_segundos=SHEETS_TTL_MAPA_SEGUNDOS)
+    df_r = leer_reservas(conn, ttl_segundos=SHEETS_TTL_MAPA_SEGUNDOS)
+    error_lectura_mapa = obtener_error_lectura_sheets()
+    if error_lectura_mapa:
+        st.warning(error_lectura_mapa)
     estados_bd = obtener_estado_boletos_bd(df_v, df_r)
 
     # Prioridad absoluta a Sheets: si esta vendido/reservado ahi, no debe quedar como carrito visual.
