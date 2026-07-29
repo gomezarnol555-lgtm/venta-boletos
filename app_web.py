@@ -126,6 +126,59 @@ CSS_CUSTOM = """
     [data-testid="column"] { min-width: 30% !important; flex: 1 1 30% !important; }
     div[class*="st-key-btn_"] button { min-height: 48px !important; font-size: 11px !important; }
 }
+
+
+/* ============================================================
+   MAPA CUADRADO RESPONSIVO EN MOVIL
+   Mantiene los botones Streamlit y solo ajusta distribucion visual.
+   ============================================================ */
+.st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] {
+    display: grid !important;
+    grid-template-columns: repeat(10, minmax(44px, 1fr)) !important;
+    gap: 7px !important;
+    align-items: stretch !important;
+}
+.st-key-mapa_boletos_grid [data-testid="column"] {
+    width: 100% !important;
+    min-width: 0 !important;
+    flex: unset !important;
+    padding: 0 !important;
+}
+.st-key-mapa_boletos_grid [data-testid="stButton"] button {
+    width: 100% !important;
+    min-height: 58px !important;
+    border-radius: 14px !important;
+    font-size: 13px !important;
+    white-space: pre-line !important;
+}
+@media (max-width: 900px) {
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] {
+        grid-template-columns: repeat(5, minmax(54px, 1fr)) !important;
+        gap: 8px !important;
+    }
+    .st-key-mapa_boletos_grid [data-testid="stButton"] button {
+        min-height: 56px !important;
+        font-size: 12px !important;
+    }
+}
+@media (max-width: 540px) {
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] {
+        grid-template-columns: repeat(5, minmax(50px, 1fr)) !important;
+        gap: 6px !important;
+    }
+    .st-key-mapa_boletos_grid [data-testid="stButton"] button {
+        min-height: 52px !important;
+        font-size: 11.5px !important;
+        padding: 1px !important;
+    }
+}
+@media (max-width: 390px) {
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] {
+        grid-template-columns: repeat(4, minmax(48px, 1fr)) !important;
+        gap: 6px !important;
+    }
+}
+
 </style>
 """
 
@@ -844,32 +897,32 @@ def renderizar_mapa_interactivo():
         estilos.append(f"<style>.{clase} button {{background:{fondo} !important; border-color:{borde} !important; color:{color} !important;}}</style>")
     st.markdown("\n".join(estilos), unsafe_allow_html=True)
 
-    for fila in range(10):
-        cols = st.columns(10)
-        for col_idx in range(10):
-            num = f"{(fila * 10 + col_idx):03d}"
-            estado = estados_pantalla[num]
-            with cols[col_idx]:
-                if estado == "vendido_db":
-                    st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Vendido")
-                elif estado == "reservado_db":
-                    st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Reservado / validando pago")
-                elif estado == "pre_reservado_otros":
-                    st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="En carrito de otro usuario")
-                else:
-                    seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
-                    etiqueta = f"🎟️\n{num}"
-                    if st.button(etiqueta, key=f"btn_{num}", type="secondary"):
-                        if seleccionado:
-                            pre_reservas.pop(num, None)
-                            if num in st.session_state.selected_tickets:
-                                st.session_state.selected_tickets.remove(num)
-                        else:
-                            pre_reservas[num] = {"session_id": mi_sesion, "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)}
-                            if num not in st.session_state.selected_tickets:
-                                st.session_state.selected_tickets.append(num)
-                        st.rerun()
-
+    with st.container(key="mapa_boletos_grid"):
+        for fila in range(10):
+            cols = st.columns(10)
+            for col_idx in range(10):
+                num = f"{(fila * 10 + col_idx):03d}"
+                estado = estados_pantalla[num]
+                with cols[col_idx]:
+                    if estado == "vendido_db":
+                        st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Vendido")
+                    elif estado == "reservado_db":
+                        st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Reservado / validando pago")
+                    elif estado == "pre_reservado_otros":
+                        st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="En carrito de otro usuario")
+                    else:
+                        seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
+                        etiqueta = f"🎟️\n{num}"
+                        if st.button(etiqueta, key=f"btn_{num}", type="secondary"):
+                            if seleccionado:
+                                pre_reservas.pop(num, None)
+                                if num in st.session_state.selected_tickets:
+                                    st.session_state.selected_tickets.remove(num)
+                            else:
+                                pre_reservas[num] = {"session_id": mi_sesion, "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)}
+                                if num not in st.session_state.selected_tickets:
+                                    st.session_state.selected_tickets.append(num)
+                            st.rerun()
 
 def procesar_retorno_pago(conn: GSheetsConnection):
     qp = st.query_params
