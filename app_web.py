@@ -44,7 +44,7 @@ MENSAJE_GENERAL_BOLETO = (
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
 CLIENT_ID_PARAM = "cid"
-SHEETS_TTL_MAPA_SEGUNDOS = 45
+SHEETS_TTL_MAPA_SEGUNDOS = 25
 SHEETS_TTL_LECTURA_SEGUNDOS = 6
 
 DIGITOS_BOLETO = max(1, len(str(max(int(TOTAL_BOLETOS) - 1, 0))))
@@ -249,14 +249,14 @@ def limpiar_query_manteniendo_cid():
 
 
 def redirigir_a_url(url: str):
-    """Redirige en la misma pestaña al proveedor de pago despues de crear el enlace."""
+    """Redirige al proveedor de pago en la misma pestaña, manteniendo el flujo del carrito."""
     url = normalizar_url(url)
     if not url:
         return
     components.html(
         f"""
         <script>
-        window.parent.location.href = {url!r};
+            window.parent.location.href = {url!r};
         </script>
         <p style="font-family:Arial; font-size:14px;">Redirigiendo al pago seguro...</p>
         """,
@@ -418,15 +418,17 @@ def hay_checkout_pendiente() -> bool:
 
 
 def restaurar_carrito_local_desde_reserva(conn: GSheetsConnection, external_reference: str) -> List[str]:
-    """Reconstruye carrito y datos capturados desde la hoja Reservas al volver desde el proveedor sin pagar."""
+    """Reconstruye carrito y datos capturados desde Reservas cuando el usuario vuelve sin pagar."""
     boletos_restaurados = []
     try:
         ext_ref = limpiar_valor_id(external_reference)
         if not ext_ref:
             return []
+
         df_r = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
         if obtener_error_lectura_sheets() or df_r.empty:
             return []
+
         grupo = df_r[df_r["External_Reference"].astype(str) == ext_ref]
         if grupo.empty:
             return []
@@ -449,7 +451,7 @@ def restaurar_carrito_local_desde_reserva(conn: GSheetsConnection, external_refe
         fila = grupo.iloc[0]
         nombre_completo = limpiar_valor_id(fila.get("Nombre", ""))
         partes_nombre = nombre_completo.split()
-        nombre = partes_nombre[0] if partes_nombre else nombre_completo
+        nombre = partes_nombre[0] if partes_nombre else ""
         apellidos = " ".join(partes_nombre[1:]) if len(partes_nombre) > 1 else ""
         correo = limpiar_valor_id(fila.get("Correo", ""))
         telefono = limpiar_valor_id(fila.get("Numero_Telefonico", ""))
@@ -1375,7 +1377,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
 
     st.success(f"✅ Reserva lista para pago: {', '.join(boletos_checkout)}")
     st.write(f"### 💰 Total a pagar: ${total_checkout:.2f} MXN")
-    st.caption("Selecciona el metodo de pago. El boton seleccionado entrara directamente al pago seguro.")
+    st.caption("Selecciona el metodo de pago. El boton Realizar pago te dirigira directamente al proveedor seleccionado.")
 
     st.markdown(f"""
     <style>
@@ -1389,7 +1391,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
         font-weight:950!important; background:{'linear-gradient(145deg,#2563EB,#1E3A8A)' if metodo == 'Stripe' else 'linear-gradient(145deg,#DBEAFE,#EFF6FF)'}!important;
         border-color:{'#1E3A8A' if metodo == 'Stripe' else '#2563EB'}!important; color:{'#FFFFFF' if metodo == 'Stripe' else '#1E3A8A'}!important;
     }}
-    .st-key-btn_entrar_pago_directo button {{
+    .st-key-btn_realizar_pago_directo button {{
         min-height:58px!important; border-radius:14px!important; font-weight:950!important;
         background:linear-gradient(135deg,#DC2626,#7F1D1D)!important; color:#FFFFFF!important; border:0!important;
         box-shadow:0 7px 18px rgba(220,38,38,.36)!important;
@@ -1403,25 +1405,31 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
     with col_st:
         st.button("🎟️ 💳 Stripe", use_container_width=True, key="btn_pago_opcion_stripe", on_click=seleccionar_metodo_pago_checkout, args=("Stripe",))
 
-    if not metodo:
-        st.warning("Selecciona un metodo de pago para activar el boton de entrada.")
-    else:
+    if metodo:
         st.info(f"Metodo seleccionado: {metodo}")
+    else:
+        st.warning("Selecciona un metodo de pago para activar Realizar pago.")
 
-    entrar = st.button(f"✅ Entrar a {metodo if metodo else 'pago'}", type="primary", use_container_width=True, key="btn_entrar_pago_directo", disabled=not bool(metodo))
-    if entrar:
+    if st.button("✅ Realizar pago", type="primary", use_container_width=True, key="btn_realizar_pago_directo", disabled=not bool(metodo)):
         errores = []
         url_pago = ""
+
         with st.spinner(f"Preparando {metodo}..."):
             if metodo == "Mercado Pago":
                 try:
                     pref_id, init_point = crear_preferencia_mercado_pago(
-                        checkout.get("nombre", ""), checkout.get("apellidos", ""), checkout.get("correo", ""),
-                        checkout.get("telefono", ""), boletos_checkout, PRECIO_BOLETO, ref_checkout
+                        checkout.get("nombre", ""),
+                        checkout.get("apellidos", ""),
+                        checkout.get("correo", ""),
+                        checkout.get("telefono", ""),
+                        boletos_checkout,
+                        PRECIO_BOLETO,
+                        ref_checkout
                     )
                 except Exception as e:
                     pref_id, init_point = "", ""
                     errores.append(f"Mercado Pago: {e}")
+
                 if init_point:
                     st.session_state.pago_generado_url = init_point
                     st.session_state.stripe_pago_url = None
@@ -1430,15 +1438,21 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
                     url_pago = init_point
                 else:
                     st.error("No fue posible preparar Mercado Pago. " + " | ".join(errores))
+
             elif metodo == "Stripe":
                 try:
                     sid, surl = crear_sesion_stripe(
-                        checkout.get("nombre", ""), checkout.get("apellidos", ""), checkout.get("correo", ""),
-                        boletos_checkout, PRECIO_BOLETO, ref_checkout
+                        checkout.get("nombre", ""),
+                        checkout.get("apellidos", ""),
+                        checkout.get("correo", ""),
+                        boletos_checkout,
+                        PRECIO_BOLETO,
+                        ref_checkout
                     )
                 except Exception as e:
                     sid, surl = "", ""
                     errores.append(f"Stripe: {e}")
+
                 if surl:
                     st.session_state.stripe_session_id = sid
                     st.session_state.stripe_pago_url = surl
