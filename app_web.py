@@ -31,7 +31,7 @@ TIEMPO_PRERESERVA_MINUTOS = 15
 # TOTAL_BOLETOS = 100  -> boletos 00 a 99
 # TOTAL_BOLETOS = 1000 -> boletos 000 a 999
 # ============================================================
-TOTAL_BOLETOS = 100
+TOTAL_BOLETOS = 1000
 PRECIO_BOLETO = 15.00
 
 # Variables impresas en el boleto PDF
