@@ -359,6 +359,59 @@ def limpiar_carrito_local():
 # COLUMNAS Y SHEETS
 # ============================================================
 
+
+def limpiar_enlaces_pago_sin_vaciar_carrito():
+    """Limpia URLs/IDs de pago, pero conserva los boletos seleccionados del carrito actual."""
+    st.session_state.pago_generado_url = None
+    st.session_state.stripe_pago_url = None
+    st.session_state.stripe_session_id = None
+    st.session_state.payment_provider = None
+    st.session_state.external_ref_activa = None
+
+
+def restaurar_carrito_local_desde_reserva(conn: GSheetsConnection, external_reference: str) -> List[str]:
+    """
+    Cuando el usuario regresa desde la plataforma de pago sin pagar,
+    reconstruye el carrito visual con los boletos de esa reserva.
+    La reserva de Sheets se puede cancelar/liberar, pero el usuario conserva
+    visualmente sus boletos en el carrito para volver a intentar el pago.
+    """
+    boletos_restaurados = []
+    try:
+        ext_ref = limpiar_valor_id(external_reference)
+        if not ext_ref:
+            return []
+
+        df_r = preparar_dataframe_para_update(leer_reservas(conn), columnas_reservas())
+        if df_r.empty:
+            return []
+
+        grupo = df_r[df_r["External_Reference"].astype(str) == ext_ref]
+        if grupo.empty:
+            return []
+
+        pre_reservas = obtener_pre_reservas_globales()
+        limpiar_pre_reservas_expiradas(pre_reservas)
+        mi_sesion = asegurar_client_id_en_url()
+
+        for _, row in grupo.iterrows():
+            boleto = parse_ticket_number(row.get("Numero_Boleto", ""))
+            if not boleto:
+                continue
+            if boleto not in boletos_restaurados:
+                boletos_restaurados.append(boleto)
+            pre_reservas[boleto] = {
+                "session_id": mi_sesion,
+                "expires_at": datetime.now() + timedelta(minutes=TIEMPO_PRERESERVA_MINUTOS)
+            }
+
+        st.session_state.selected_tickets = boletos_restaurados
+        limpiar_enlaces_pago_sin_vaciar_carrito()
+        return boletos_restaurados
+    except Exception:
+        return []
+
+
 def columnas_ventas() -> list:
     return [
         "ID_Boleto", "Nombre", "Correo", "Evento", "Numero_Boleto", "Precio",
@@ -1184,8 +1237,8 @@ def renderizar_mapa_interactivo():
 
     conn = st.connection("gsheets", type=GSheetsConnection)
     try:
-        df_v = conn.read(worksheet="Ventas", ttl=5).dropna(how="all")
-        df_r = conn.read(worksheet="Reservas", ttl=5).dropna(how="all")
+        df_v = conn.read(worksheet="Ventas", ttl=0).dropna(how="all")
+        df_r = conn.read(worksheet="Reservas", ttl=0).dropna(how="all")
     except Exception:
         df_v = pd.DataFrame(columns=columnas_ventas())
         df_r = pd.DataFrame(columns=columnas_reservas())
@@ -1284,10 +1337,10 @@ def procesar_retorno_pago(conn):
     ext_ref = qp_get(qp, "external_reference", "") or st.session_state.get("external_ref_activa", "")
 
     if mp_return == "failure" or mp_status in ["rejected", "cancelled", "canceled", "failure", "failed"]:
+        restaurar_carrito_local_desde_reserva(conn, ext_ref)
         liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_MERCADO_PAGO")
-        limpiar_carrito_local()
         limpiar_query_manteniendo_cid()
-        st.warning("Pago cancelado o rechazado. La reserva fue liberada.")
+        st.warning("Regresaste sin completar el pago. Conservamos tus boletos en el carrito para que puedas intentarlo nuevamente.")
         st.rerun()
 
     if payment_id and mp_status == "approved":
@@ -1313,10 +1366,10 @@ def procesar_retorno_pago(conn):
             st.rerun()
 
     if "stripe_cancelled" in qp:
+        restaurar_carrito_local_desde_reserva(conn, ext_ref)
         liberar_reserva_por_rechazo_o_cancelacion(conn, ext_ref, "CANCELADO_STRIPE")
-        limpiar_carrito_local()
         limpiar_query_manteniendo_cid()
-        st.warning("Pago cancelado o rechazado. La reserva fue liberada.")
+        st.warning("Regresaste sin completar el pago. Conservamos tus boletos en el carrito para que puedas intentarlo nuevamente.")
         st.rerun()
 
     stripe_session_id = qp_get(qp, "stripe_session_id", "")
@@ -1474,6 +1527,7 @@ def main():
                             if st.session_state.get("external_ref_activa"):
                                 liberar_reserva_por_rechazo_o_cancelacion(conn, st.session_state.external_ref_activa, "CANCELADO_USUARIO")
                             limpiar_carrito_local()
+                            limpiar_query_manteniendo_cid()
                             st.rerun()
                     else:
                         c1, c2 = st.columns(2)
