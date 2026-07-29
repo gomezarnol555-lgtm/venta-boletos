@@ -17,8 +17,15 @@ from reportlab.graphics.barcode import qr
 from reportlab.graphics.shapes import Drawing
 from streamlit_gsheets import GSheetsConnection
 
-import mercadopago
-import stripe
+try:
+    import mercadopago
+except Exception:
+    mercadopago = None
+
+try:
+    import stripe
+except Exception:
+    stripe = None
 
 TIEMPO_RESERVA_MINUTOS = 1440
 TIEMPO_PRERESERVA_MINUTOS = 15
@@ -45,6 +52,7 @@ MENSAJE_GENERAL_BOLETO = (
 
 DIGITOS_BOLETO = max(1, len(str(max(int(TOTAL_BOLETOS) - 1, 0))))
 COLUMNAS_MAPA = max(1, math.ceil(math.sqrt(max(int(TOTAL_BOLETOS), 1))))
+FILAS_MAPA = COLUMNAS_MAPA
 
 
 def formatear_numero_boleto(valor: Any) -> str:
@@ -76,8 +84,8 @@ STRIPE_RETURN_URL = obtener_config("STRIPE_RETURN_URL")
 STRIPE_CURRENCY_ID = obtener_config("STRIPE_CURRENCY_ID", "mxn").lower()
 DEBUG_PAGOS = obtener_config("DEBUG_PAGOS", "false").lower() in ["1", "true", "si", "yes", "on"]
 
-sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if MP_ACCESS_TOKEN else None
-if STRIPE_SECRET_KEY:
+sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if (MP_ACCESS_TOKEN and mercadopago is not None) else None
+if STRIPE_SECRET_KEY and stripe is not None:
     stripe.api_key = STRIPE_SECRET_KEY
 
 CSS_CUSTOM = """
@@ -153,19 +161,19 @@ CSS_CUSTOM = """
     white-space: pre-line !important;
 }
 @media (max-width: 900px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat(5, minmax(54px, 1fr)) !important; gap: 8px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(32px, 1fr)) !important; gap: 8px !important; }
     .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height: 56px !important; font-size: 12px !important; }
     .metric-container { display: grid !important; grid-template-columns: repeat(2, minmax(120px, 1fr)) !important; gap: 8px !important; }
 }
 @media (max-width: 540px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat(5, minmax(50px, 1fr)) !important; gap: 6px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(28px, 1fr)) !important; gap: 6px !important; }
     .st-key-mapa_boletos_grid [data-testid="stButton"] button { min-height: 52px !important; font-size: 11.5px !important; padding: 1px !important; }
     .metric-container { grid-template-columns: repeat(2, minmax(110px, 1fr)) !important; }
     .metric-box h2 { font-size: 17px !important; }
     .metric-box p { font-size: 11px !important; }
 }
 @media (max-width: 390px) {
-    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat(4, minmax(48px, 1fr)) !important; gap: 6px !important; }
+    .st-key-mapa_boletos_grid [data-testid="stHorizontalBlock"] { grid-template-columns: repeat({COLUMNAS_MAPA}, minmax(24px, 1fr)) !important; gap: 6px !important; }
 }
 </style>
 """
@@ -274,23 +282,32 @@ def texto_boletos(datos_boletos: List[Dict[str, Any]]) -> str:
 def crear_qr_boleto(datos_boletos: List[Dict[str, Any]]) -> Drawing:
     boletos_txt = texto_boletos(datos_boletos) or "N/A"
     nombre_cliente = ""
+    id_visual = ""
+
     if datos_boletos:
         nombre_cliente = str(datos_boletos[0].get("Nombre", ""))
+        numero_base = parse_ticket_number(datos_boletos[0].get("Numero_Boleto", ""))
+        id_visual = f"Bol-{numero_base}" if numero_base else "Bol-N/A"
 
+    # Contenido corto para mejorar la lectura del QR en celulares.
+    # No contiene claves de pago, sesiones Stripe ni datos sensibles.
     contenido_qr = (
-        f"Evento: {NOMBRE_EVENTO}\n"
-        f"Boleto(s): {boletos_txt}\n"
-        f"Cliente: {nombre_cliente}\n"
-        f"Vigencia: {FECHA_VIGENCIA_BOLETO}"
+        f"EVENTO:{NOMBRE_EVENTO}\n"
+        f"BOLETO:{boletos_txt}\n"
+        f"ID:{id_visual}\n"
+        f"NOMBRE:{nombre_cliente}\n"
+        f"VIGENCIA:{FECHA_VIGENCIA_BOLETO}"
     )
 
     qr_widget = qr.QrCodeWidget(contenido_qr)
     bounds = qr_widget.getBounds()
     ancho = bounds[2] - bounds[0]
     alto = bounds[3] - bounds[1]
-    escala = 86 / max(ancho, alto)
 
-    dibujo = Drawing(92, 92, transform=[escala, 0, 0, escala, 3, 3])
+    # QR mas grande y con margen suficiente para facilitar el escaneo.
+    tamano_final = 122
+    escala = tamano_final / max(ancho, alto)
+    dibujo = Drawing(130, 130, transform=[escala, 0, 0, escala, 4, 4])
     dibujo.add(qr_widget)
     return dibujo
 
@@ -577,7 +594,7 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
             [crear_qr_boleto(datos_boletos)],
             [Paragraph("Codigo QR de validacion", estilo_mensaje)],
         ],
-        colWidths=[135]
+        colWidths=[145]
     )
     qr_box.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#0A2540")),
@@ -588,7 +605,7 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
 
-    resumen = Table([[resumen_izquierdo, qr_box]], colWidths=[355, 145])
+    resumen = Table([[resumen_izquierdo, qr_box]], colWidths=[345, 155])
     resumen.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -676,7 +693,7 @@ def construir_pago_stripe_desde_session(session: Any, external_reference_reserva
 
 
 def obtener_pago_stripe(stripe_session_id: str, external_reference_esperada: Optional[str] = None, monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
-    if not STRIPE_SECRET_KEY or not stripe_session_id:
+    if stripe is None or not STRIPE_SECRET_KEY or not stripe_session_id:
         return None
     try:
         session = stripe.checkout.Session.retrieve(stripe_session_id, expand=["payment_intent"])
@@ -687,7 +704,7 @@ def obtener_pago_stripe(stripe_session_id: str, external_reference_esperada: Opt
 
 
 def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_reference_esperada: Optional[str] = None, monto_esperado: Optional[float] = None, correo_reserva: str = "") -> Optional[Dict[str, Any]]:
-    if not STRIPE_SECRET_KEY or not payment_intent_id:
+    if stripe is None or not STRIPE_SECRET_KEY or not payment_intent_id:
         return None
     payment_intent_id = str(payment_intent_id or "").strip()
     if not payment_intent_id.startswith("pi_"):
@@ -706,7 +723,7 @@ def obtener_pago_stripe_por_payment_intent(payment_intent_id: str, external_refe
 
 
 def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
-    if not STRIPE_SECRET_KEY:
+    if stripe is None or not STRIPE_SECRET_KEY:
         return None
     try:
         sesiones = stripe.checkout.Session.list(limit=100, status="complete", created=normalizar_fecha_unix(fecha_creacion_reserva), expand=["data.payment_intent"])
@@ -721,7 +738,7 @@ def buscar_pago_stripe_por_referencia_correo_fecha(external_reference: str, corr
 
 
 def buscar_pago_stripe_payment_intent_por_correo_fecha(external_reference: str, correo: str, monto_esperado: Optional[float], fecha_creacion_reserva: str) -> Optional[Dict[str, Any]]:
-    if not STRIPE_SECRET_KEY:
+    if stripe is None or not STRIPE_SECRET_KEY:
         return None
     try:
         monto_centavos = int(round(float(monto_esperado) * 100)) if monto_esperado is not None else None
@@ -825,6 +842,8 @@ def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_
 
 
 def crear_sesion_stripe(nombre: str, apellidos: str, correo: str, numeros_boletos: List[str], monto_unitario: float, external_reference: str) -> Tuple[str, str]:
+    if stripe is None:
+        raise ValueError("La libreria stripe no esta instalada. Agrega stripe en requirements.txt.")
     if not STRIPE_SECRET_KEY:
         raise ValueError("STRIPE_SECRET_KEY no esta configurado.")
     if STRIPE_SECRET_KEY.startswith("pk_"):
@@ -982,7 +1001,7 @@ def renderizar_mapa_interactivo():
         estilos.append(f"<style>.{clase} button {{background:{fondo} !important; border-color:{borde} !important; color:{color} !important;}}</style>")
     st.markdown("\n".join(estilos), unsafe_allow_html=True)
 
-    filas_mapa = math.ceil(TOTAL_BOLETOS / COLUMNAS_MAPA)
+    filas_mapa = FILAS_MAPA
     with st.container(key="mapa_boletos_grid"):
         for fila in range(filas_mapa):
             cols = st.columns(COLUMNAS_MAPA)
@@ -1086,6 +1105,10 @@ def main():
     st.set_page_config(page_title="Rifa de Celular", page_icon="🎟️", layout="wide")
     st.markdown(CSS_CUSTOM.replace("{COLUMNAS_MAPA}", str(COLUMNAS_MAPA)), unsafe_allow_html=True)
     inicializar_estado()
+    if mercadopago is None:
+        st.warning("La libreria mercadopago no esta instalada. Agregala en requirements.txt.")
+    if stripe is None:
+        st.warning("La libreria stripe no esta instalada. Agregala en requirements.txt.")
     if not MP_ACCESS_TOKEN:
         st.warning("Mercado Pago no esta configurado.")
     if not STRIPE_SECRET_KEY:
