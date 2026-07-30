@@ -26,12 +26,18 @@ try:
 except Exception:
     stripe = None
 
+try:
+    from supabase import create_client, Client
+except Exception:
+    create_client = None
+    Client = None
+
 # ============================================================
 # CONFIGURACION GENERAL
 # Cambia solamente estas variables.
 # ============================================================
 TOTAL_BOLETOS = 100
-PRECIO_BOLETO = 10.00
+PRECIO_BOLETO = 15.00
 NOMBRE_EVENTO = "Gran Rifa"
 FECHA_VIGENCIA_BOLETO = "31/12/2026"
 MENSAJE_GENERAL_BOLETO = (
@@ -68,10 +74,21 @@ STRIPE_SECRET_KEY = obtener_config("STRIPE_SECRET_KEY")
 STRIPE_RETURN_URL = obtener_config("STRIPE_RETURN_URL")
 STRIPE_CURRENCY_ID = obtener_config("STRIPE_CURRENCY_ID", "mxn").lower()
 DEBUG_PAGOS = obtener_config("DEBUG_PAGOS", "false").lower() in ["1", "true", "si", "yes", "on"]
+SUPABASE_URL = obtener_config("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = obtener_config("SUPABASE_SERVICE_ROLE_KEY")
+USAR_SUPABASE_TRANSACCIONAL = obtener_config("USAR_SUPABASE_TRANSACCIONAL", "true").lower() in ["1", "true", "si", "yes", "on"]
 
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if (MP_ACCESS_TOKEN and mercadopago is not None) else None
 if STRIPE_SECRET_KEY and stripe is not None:
     stripe.api_key = STRIPE_SECRET_KEY
+
+supabase: Optional[Client] = None
+if USAR_SUPABASE_TRANSACCIONAL and create_client is not None and SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    except Exception:
+        supabase = None
+
 
 CSS_CUSTOM = """
 <style>
@@ -153,51 +170,10 @@ CSS_CUSTOM = """
     border: 2px dashed #000000 !important;
     box-shadow: 0 5px 12px rgba(0,0,0,0.30) !important;
 }
-
 .st-key-mapa_boletos_grid [data-testid="stButton"] button[kind="primary"]:hover {
     background: linear-gradient(135deg, #000000, #1F2937) !important;
     transform: translateY(-2px) scale(1.03) !important;
 }
-
-/* ============================================================
-   BOTONES DE PAGO MAS RAPIDOS Y TIPO TICKET
-   ============================================================ */
-.st-key-btn_pago_opcion_mp button,
-.st-key-btn_pago_opcion_stripe button,
-.st-key-btn_elegir_mp button,
-.st-key-btn_elegir_stripe button {
-    min-height: 62px !important;
-    border-radius: 16px !important;
-    border-style: dashed !important;
-    border-width: 2px !important;
-    font-weight: 950 !important;
-    letter-spacing: .2px !important;
-    transition: all .14s ease-in-out !important;
-    box-shadow: 0 4px 10px rgba(15,23,42,.12) !important;
-}
-
-.st-key-btn_pago_opcion_mp button,
-.st-key-btn_elegir_mp button {
-    background: linear-gradient(145deg,#D1FAE5,#ECFDF5) !important;
-    border-color: #10B981 !important;
-    color: #064E3B !important;
-}
-
-.st-key-btn_pago_opcion_stripe button,
-.st-key-btn_elegir_stripe button {
-    background: linear-gradient(145deg,#DBEAFE,#EFF6FF) !important;
-    border-color: #2563EB !important;
-    color: #1E3A8A !important;
-}
-
-.st-key-btn_pago_opcion_mp button:hover,
-.st-key-btn_pago_opcion_stripe button:hover,
-.st-key-btn_elegir_mp button:hover,
-.st-key-btn_elegir_stripe button:hover {
-    transform: translateY(-2px) scale(1.012) !important;
-    box-shadow: 0 8px 18px rgba(15,23,42,.18) !important;
-}
-
 .st-key-btn_realizar_pago_directo a,
 .st-key-btn_realizar_pago_directo button,
 [data-testid="stLinkButton"] a {
@@ -209,13 +185,6 @@ CSS_CUSTOM = """
     font-weight: 950 !important;
     box-shadow: 0 7px 18px rgba(220,38,38,.32) !important;
     transition: all .14s ease-in-out !important;
-}
-
-.st-key-btn_realizar_pago_directo a:hover,
-.st-key-btn_realizar_pago_directo button:hover,
-[data-testid="stLinkButton"] a:hover {
-    transform: translateY(-2px) scale(1.008) !important;
-    box-shadow: 0 9px 20px rgba(153,27,27,.36) !important;
 }
 
 </style>
@@ -363,6 +332,128 @@ def safe_data_list(obj: Any) -> list:
         return data
     try:
         return list(data)
+    except Exception:
+        return []
+
+
+# ============================================================
+# SUPABASE TRANSACCIONAL
+# ============================================================
+
+def supabase_activo() -> bool:
+    return bool(USAR_SUPABASE_TRANSACCIONAL and supabase is not None)
+
+
+def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    if not supabase_activo():
+        return False, "Supabase no esta configurado en Streamlit. Revisa SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y requirements.txt."
+
+    if not ordenes:
+        return False, "No hay boletos para reservar en Supabase."
+
+    ref = limpiar_valor_id(ordenes[0].get("External_Reference", ""))
+    nombre = limpiar_valor_id(ordenes[0].get("Nombre", ""))
+    correo = limpiar_valor_id(ordenes[0].get("Correo", "")).lower()
+    telefono = limpiar_valor_id(ordenes[0].get("Numero_Telefonico", ""))
+    boletos = []
+
+    for orden in ordenes:
+        boleto = parse_ticket_number(orden.get("Numero_Boleto", ""))
+        if boleto and boleto not in boletos:
+            boletos.append(boleto)
+
+    try:
+        precio = float(ordenes[0].get("Monto", PRECIO_BOLETO) or PRECIO_BOLETO)
+    except Exception:
+        precio = float(PRECIO_BOLETO)
+
+    if not ref or not boletos:
+        return False, "Reserva Supabase invalida: falta referencia o boletos."
+
+    params = {
+        "p_external_reference": ref,
+        "p_boletos": boletos,
+        "p_nombre": nombre,
+        "p_correo": correo,
+        "p_telefono": telefono,
+        "p_precio": precio,
+        "p_minutos_reserva": int(TIEMPO_RESERVA_MINUTOS),
+    }
+
+    try:
+        result = supabase.rpc("reservar_boletos", params).execute()
+        return True, "Exito Supabase"
+    except Exception as e:
+        return False, f"Error Supabase al reservar: {e}"
+
+
+def leer_mapa_supabase() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if not supabase_activo():
+        return pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
+
+    try:
+        boletos_data = supabase.table("boletos").select("numero_boleto,estado,external_reference_actual,fecha_actualizacion").execute().data or []
+        ventas_rows = []
+        reservas_rows = []
+
+        for row in boletos_data:
+            num = parse_ticket_number(row.get("numero_boleto", ""))
+            estado = str(row.get("estado", "") or "").upper()
+            ref = limpiar_valor_id(row.get("external_reference_actual", ""))
+
+            if estado == "VENDIDO":
+                ventas_rows.append({
+                    "Numero_Boleto": num,
+                    "Estado_Pago": "VENDIDO",
+                    "Referencia_Pago": ref,
+                })
+            elif estado == "RESERVADO":
+                reservas_rows.append({
+                    "External_Reference": ref,
+                    "Numero_Boleto": num,
+                    "Estado_Reserva": "PENDIENTE",
+                    "Expira_En": (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
+                })
+
+        return asegurar_columnas(pd.DataFrame(ventas_rows), columnas_ventas()), asegurar_columnas(pd.DataFrame(reservas_rows), columnas_reservas())
+    except Exception as e:
+        st.session_state["_sheet_read_error"] = f"Error leyendo mapa desde Supabase: {e}"
+        return pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
+
+
+def consultar_ventas_supabase_por_boleto_correo(numero_boleto: str, correo: str) -> List[Dict[str, Any]]:
+    if not supabase_activo():
+        return []
+    try:
+        num = parse_ticket_number(numero_boleto)
+        correo_limpio = str(correo or "").strip().lower()
+        data = supabase.table("ventas").select("id_boleto,nombre,correo,evento,numero_boleto,precio,metodo_pago,codigo_pago,fecha_compra,telefono,estado_pago,external_reference,stripe_payment_id,stripe_session_id,mercadopago_payment_id,mercadopago_preference_id,proveedor_pago").eq("numero_boleto", num).eq("correo", correo_limpio).execute().data or []
+        if not data:
+            return []
+        ref = data[-1].get("external_reference", "")
+        ventas_ref = supabase.table("ventas").select("id_boleto,nombre,correo,evento,numero_boleto,precio,metodo_pago,codigo_pago,fecha_compra,telefono,estado_pago,external_reference,stripe_payment_id,stripe_session_id,mercadopago_payment_id,mercadopago_preference_id,proveedor_pago").eq("external_reference", ref).execute().data or []
+        salida = []
+        for v in ventas_ref:
+            salida.append({
+                "ID_Boleto": v.get("id_boleto", ""),
+                "Nombre": v.get("nombre", ""),
+                "Correo": v.get("correo", ""),
+                "Evento": v.get("evento", NOMBRE_EVENTO),
+                "Numero_Boleto": parse_ticket_number(v.get("numero_boleto", "")),
+                "Precio": v.get("precio", ""),
+                "Metodo_Pago": v.get("metodo_pago", ""),
+                "Codigo_Pago": v.get("codigo_pago", ""),
+                "Fecha_Compra": v.get("fecha_compra", ""),
+                "Numero_Telefonico": v.get("telefono", ""),
+                "Estado_Pago": v.get("estado_pago", "VENDIDO"),
+                "Referencia_Pago": v.get("external_reference", ""),
+                "MercadoPago_Payment_ID": v.get("mercadopago_payment_id", ""),
+                "MercadoPago_Preference_ID": v.get("mercadopago_preference_id", ""),
+                "Stripe_Payment_ID": v.get("stripe_payment_id", ""),
+                "Stripe_Session_ID": v.get("stripe_session_id", ""),
+                "Proveedor_Pago": v.get("proveedor_pago", ""),
+            })
+        return salida
     except Exception:
         return []
 
@@ -736,16 +827,25 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
     try:
         if not ordenes:
             return False, "No hay boletos para reservar."
+
+        # Nueva fuente principal: Supabase transaccional.
+        # Si falla Supabase, no se genera link de pago para evitar ventas sin reserva transaccional.
+        if supabase_activo():
+            ok_supabase, msg_supabase = reservar_boletos_supabase(ordenes)
+            if not ok_supabase:
+                return False, msg_supabase
+
         numeros_boletos = [parse_ticket_number(o.get("Numero_Boleto", "")) for o in ordenes]
         df_v_actual = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
         if obtener_error_lectura_sheets():
-            return False, obtener_error_lectura_sheets()
+            # La reserva transaccional ya quedo en Supabase; no bloqueamos el pago solo por la copia visual.
+            return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
         df_r_actual = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
         if obtener_error_lectura_sheets():
-            return False, obtener_error_lectura_sheets()
+            return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
         df_r_actual = liberar_reservas_previas_mismo_cliente(df_r_actual, ordenes)
         disponible, mensaje = boletos_disponibles_para_reservar(numeros_boletos, df_v_actual, df_r_actual)
-        if not disponible:
+        if not disponible and not supabase_activo():
             return False, mensaje
         df_nuevo = preparar_dataframe_para_update(pd.DataFrame(ordenes), columnas_reservas())
         df_actualizado = pd.concat([df_r_actual.dropna(how="all"), df_nuevo], ignore_index=True)
@@ -885,114 +985,41 @@ def dibujar_fondo_autenticidad(canvas, doc):
 
 
 def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
-    """Genera un PDF tipo ticket con una pagina independiente por cada boleto comprado."""
-    if not datos_boletos:
-        return "Boleto_Sin_Datos.pdf"
-
     boletos_txt = texto_boletos(datos_boletos) or "N/A"
     nombre_archivo = f"Boleto_{boletos_txt.replace(', ', '_')}.pdf"
-
-    doc = SimpleDocTemplate(
-        nombre_archivo,
-        pagesize=letter,
-        rightMargin=46,
-        leftMargin=46,
-        topMargin=70,
-        bottomMargin=50
-    )
-
+    doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=46, leftMargin=46, topMargin=70, bottomMargin=50)
     story = []
     styles = getSampleStyleSheet()
-
     estilo_titulo = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.white, alignment=1)
     estilo_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=9.5, textColor=colors.HexColor("#E2E8F0"), alignment=1)
     estilo_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#334155"))
     estilo_bold = ParagraphStyle("Bold", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#0A2540"))
-    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=28, leading=34, textColor=colors.HexColor("#991B1B"), alignment=1)
+    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=26, leading=32, textColor=colors.HexColor("#0A2540"), alignment=1)
     estilo_evento = ParagraphStyle("Evento", parent=styles["Heading2"], fontSize=13, leading=16, textColor=colors.HexColor("#0A2540"), alignment=1)
     estilo_mensaje = ParagraphStyle("Mensaje", parent=styles["Normal"], fontSize=8.7, leading=11, textColor=colors.HexColor("#475569"), alignment=1)
-
-    for idx, boleto in enumerate(datos_boletos):
+    encabezado = Table([[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]], colWidths=[500])
+    encabezado.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+    story += [encabezado, Spacer(1, 22)]
+    resumen = Table([[Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)], [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)], [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de validacion", estilo_bold)], [Paragraph(boletos_txt, estilo_num), Paragraph(f"Bol-{boletos_txt}", estilo_num)]], colWidths=[250, 250])
+    resumen.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")), ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")), ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#CBD5E1")), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
+    story += [resumen, Spacer(1, 18)]
+    mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
+    mensaje.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")), ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#CBD5E1")), ("TOPPADDING", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 9)]))
+    story += [mensaje, Spacer(1, 18)]
+    filas = []
+    for boleto in datos_boletos:
         numero_boleto = parse_ticket_number(boleto.get("Numero_Boleto", ""))
-        id_visual = f"Bol-{numero_boleto}"
-
+        fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0] or datetime.now().strftime("%Y-%m-%d")
         try:
             precio_txt = f"${float(boleto.get('Precio', 0) or 0):.2f} {MP_CURRENCY_ID}"
         except Exception:
             precio_txt = str(boleto.get("Precio", ""))
-
-        fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0]
-        if not fecha_compra:
-            fecha_compra = datetime.now().strftime("%Y-%m-%d")
-
-        encabezado = Table(
-            [[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]],
-            colWidths=[500]
-        )
-        encabezado.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ]))
-
-        story.append(encabezado)
-        story.append(Spacer(1, 22))
-
-        resumen = Table(
-            [
-                [Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)],
-                [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
-                [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de validacion", estilo_bold)],
-                [Paragraph(numero_boleto, estilo_num), Paragraph(id_visual, estilo_num)],
-            ],
-            colWidths=[250, 250]
-        )
-        resumen.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
-            ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")),
-            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#0A2540")),
-            ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#CBD5E1")),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ]))
-        story.append(resumen)
-        story.append(Spacer(1, 18))
-
-        mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
-        mensaje.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
-            ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#CBD5E1")),
-            ("TOPPADDING", (0, 0), (-1, -1), 9),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
-        ]))
-        story.append(mensaje)
-        story.append(Spacer(1, 18))
-
-        filas = [
-            [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(id_visual, estilo_celda)],
-            [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
-            [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)],
-            [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)],
-            [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)],
-            [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)],
-        ]
-
-        detalle = Table(filas, colWidths=[160, 340])
-        detalle.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), .9, colors.HexColor("#0A2540")),
-            ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#E2E8F0")),
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ]))
-        story.append(detalle)
-
-        if idx < len(datos_boletos) - 1:
-            story.append(PageBreak())
-
+        filas.extend([[Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(f"Bol-{numero_boleto}", estilo_celda)], [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)], [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)], [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)], [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)], [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)]])
+        if len(datos_boletos) > 1:
+            filas.append([Paragraph("", estilo_celda), Paragraph("", estilo_celda)])
+    detalle = Table(filas, colWidths=[160, 340])
+    detalle.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .9, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#E2E8F0")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+    story.append(detalle)
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
 
@@ -1001,20 +1028,10 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
     if not datos_boletos:
         st.warning("No hay boletos disponibles para generar PDF.")
         return
-
     archivo_pdf = generar_pdf_boleto(datos_boletos)
     with open(archivo_pdf, "rb") as pdf_file:
         pdf_bytes = pdf_file.read()
-
-    st.download_button(
-        label="🎟️ Descargar boleto en PDF" if len(datos_boletos) == 1 else "🎟️ Descargar boletos en PDF",
-        data=pdf_bytes,
-        file_name=archivo_pdf,
-        mime="application/pdf",
-        type="primary",
-        use_container_width=True
-    )
-
+    st.download_button(label="🎟️ Descargar boleto en PDF" if len(datos_boletos) == 1 else "🎟️ Descargar boletos en PDF", data=pdf_bytes, file_name=archivo_pdf, mime="application/pdf", type="primary", use_container_width=True)
 
 # ============================================================
 # PAGOS
@@ -1198,6 +1215,9 @@ def extraer_ids_pago_de_reserva(grupo_reserva):
 
 
 def recuperar_boletos_por_reserva(conn, numero_boleto, correo):
+    datos_supabase = consultar_ventas_supabase_por_boleto_correo(numero_boleto, correo)
+    if datos_supabase:
+        return datos_supabase
     df_v = leer_ventas(conn, ttl_segundos=3)
     correo_limpio = correo.strip().lower()
     num = parse_ticket_number(numero_boleto)
@@ -1301,6 +1321,19 @@ def limpiar_cache_mapa():
 
 def obtener_datos_mapa_cache(conn: GSheetsConnection) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Evita releer Sheets en cada click del mapa; refresca solo por ventana corta o cuando no hay cache."""
+    if supabase_activo():
+        ahora = time.time()
+        ts = float(st.session_state.get("_mapa_cache_ts", 0) or 0)
+        df_v_cache = st.session_state.get("_mapa_cache_ventas")
+        df_r_cache = st.session_state.get("_mapa_cache_reservas")
+        if isinstance(df_v_cache, pd.DataFrame) and isinstance(df_r_cache, pd.DataFrame) and (ahora - ts) < SHEETS_TTL_MAPA_SEGUNDOS:
+            return df_v_cache.copy(), df_r_cache.copy()
+        df_v, df_r = leer_mapa_supabase()
+        st.session_state["_mapa_cache_ts"] = ahora
+        st.session_state["_mapa_cache_ventas"] = df_v.copy()
+        st.session_state["_mapa_cache_reservas"] = df_r.copy()
+        return df_v, df_r
+
     ahora = time.time()
     ts = float(st.session_state.get("_mapa_cache_ts", 0) or 0)
     df_v_cache = st.session_state.get("_mapa_cache_ventas")
