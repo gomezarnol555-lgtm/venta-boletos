@@ -37,7 +37,7 @@ except Exception:
 # Cambia solamente estas variables.
 # ============================================================
 TOTAL_BOLETOS = 100
-PRECIO_BOLETO = 10.00
+PRECIO_BOLETO = 15.00
 NOMBRE_EVENTO = "Gran Rifa"
 FECHA_VIGENCIA_BOLETO = "31/12/2026"
 MENSAJE_GENERAL_BOLETO = (
@@ -66,6 +66,22 @@ def obtener_config(nombre: str, default: str = "") -> str:
     return str(os.getenv(nombre, default)).strip()
 
 
+def normalizar_supabase_project_url(url: str) -> str:
+    """Normaliza SUPABASE_URL para que sea solo la URL raíz del proyecto.
+
+    Correcto: https://xxxx.supabase.co
+    Incorrecto: https://xxxx.supabase.co/rest/v1
+    Incorrecto: https://supabase.com/dashboard/project/xxxx
+    """
+    url = str(url or "").strip().strip(' "\'')
+    if not url:
+        return ""
+    url = url.rstrip("/")
+    if url.endswith("/rest/v1"):
+        url = url[:-8]
+    return url.rstrip("/")
+
+
 MP_ACCESS_TOKEN = obtener_config("MP_ACCESS_TOKEN")
 MP_NOTIFICATION_URL = obtener_config("MP_NOTIFICATION_URL")
 MP_RETURN_URL = obtener_config("MP_RETURN_URL")
@@ -74,7 +90,7 @@ STRIPE_SECRET_KEY = obtener_config("STRIPE_SECRET_KEY")
 STRIPE_RETURN_URL = obtener_config("STRIPE_RETURN_URL")
 STRIPE_CURRENCY_ID = obtener_config("STRIPE_CURRENCY_ID", "mxn").lower()
 DEBUG_PAGOS = obtener_config("DEBUG_PAGOS", "false").lower() in ["1", "true", "si", "yes", "on"]
-SUPABASE_URL = obtener_config("SUPABASE_URL")
+SUPABASE_URL = normalizar_supabase_project_url(obtener_config("SUPABASE_URL"))
 SUPABASE_SERVICE_ROLE_KEY = obtener_config("SUPABASE_SERVICE_ROLE_KEY")
 USAR_SUPABASE_TRANSACCIONAL = obtener_config("USAR_SUPABASE_TRANSACCIONAL", "true").lower() in ["1", "true", "si", "yes", "on"]
 
@@ -344,10 +360,31 @@ def supabase_activo() -> bool:
     return bool(USAR_SUPABASE_TRANSACCIONAL and supabase is not None)
 
 
+def normalizar_venta_supabase(v: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ID_Boleto": v.get("id_boleto", ""),
+        "Nombre": v.get("nombre", ""),
+        "Correo": v.get("correo", ""),
+        "Evento": v.get("evento", NOMBRE_EVENTO),
+        "Numero_Boleto": parse_ticket_number(v.get("numero_boleto", "")),
+        "Precio": v.get("precio", ""),
+        "Metodo_Pago": v.get("metodo_pago", ""),
+        "Codigo_Pago": v.get("codigo_pago", ""),
+        "Fecha_Compra": v.get("fecha_compra", ""),
+        "Numero_Telefonico": v.get("telefono", ""),
+        "Estado_Pago": v.get("estado_pago", "VENDIDO"),
+        "Referencia_Pago": v.get("external_reference", ""),
+        "MercadoPago_Payment_ID": v.get("mercadopago_payment_id", ""),
+        "MercadoPago_Preference_ID": v.get("mercadopago_preference_id", ""),
+        "Stripe_Payment_ID": v.get("stripe_payment_id", ""),
+        "Stripe_Session_ID": v.get("stripe_session_id", ""),
+        "Proveedor_Pago": v.get("proveedor_pago", ""),
+    }
+
+
 def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]:
     if not supabase_activo():
         return False, "Supabase no esta configurado en Streamlit. Revisa SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y requirements.txt."
-
     if not ordenes:
         return False, "No hay boletos para reservar en Supabase."
 
@@ -356,17 +393,14 @@ def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]
     correo = limpiar_valor_id(ordenes[0].get("Correo", "")).lower()
     telefono = limpiar_valor_id(ordenes[0].get("Numero_Telefonico", ""))
     boletos = []
-
     for orden in ordenes:
         boleto = parse_ticket_number(orden.get("Numero_Boleto", ""))
         if boleto and boleto not in boletos:
             boletos.append(boleto)
-
     try:
         precio = float(ordenes[0].get("Monto", PRECIO_BOLETO) or PRECIO_BOLETO)
     except Exception:
         precio = float(PRECIO_BOLETO)
-
     if not ref or not boletos:
         return False, "Reserva Supabase invalida: falta referencia o boletos."
 
@@ -379,9 +413,8 @@ def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]
         "p_precio": precio,
         "p_minutos_reserva": int(TIEMPO_RESERVA_MINUTOS),
     }
-
     try:
-        result = supabase.rpc("reservar_boletos", params).execute()
+        supabase.rpc("reservar_boletos", params).execute()
         return True, "Exito Supabase"
     except Exception as e:
         return False, f"Error Supabase al reservar: {e}"
@@ -390,23 +423,16 @@ def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]
 def leer_mapa_supabase() -> Tuple[pd.DataFrame, pd.DataFrame]:
     if not supabase_activo():
         return pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
-
     try:
         boletos_data = supabase.table("boletos").select("numero_boleto,estado,external_reference_actual,fecha_actualizacion").execute().data or []
         ventas_rows = []
         reservas_rows = []
-
         for row in boletos_data:
             num = parse_ticket_number(row.get("numero_boleto", ""))
             estado = str(row.get("estado", "") or "").upper()
             ref = limpiar_valor_id(row.get("external_reference_actual", ""))
-
             if estado == "VENDIDO":
-                ventas_rows.append({
-                    "Numero_Boleto": num,
-                    "Estado_Pago": "VENDIDO",
-                    "Referencia_Pago": ref,
-                })
+                ventas_rows.append({"Numero_Boleto": num, "Estado_Pago": "VENDIDO", "Referencia_Pago": ref})
             elif estado == "RESERVADO":
                 reservas_rows.append({
                     "External_Reference": ref,
@@ -414,11 +440,32 @@ def leer_mapa_supabase() -> Tuple[pd.DataFrame, pd.DataFrame]:
                     "Estado_Reserva": "PENDIENTE",
                     "Expira_En": (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S"),
                 })
-
         return asegurar_columnas(pd.DataFrame(ventas_rows), columnas_ventas()), asegurar_columnas(pd.DataFrame(reservas_rows), columnas_reservas())
     except Exception as e:
-        st.session_state["_sheet_read_error"] = f"Error leyendo mapa desde Supabase: {e}"
+        st.session_state["_sheet_read_error"] = f"Error leyendo mapa desde Supabase: {e}. Revisa que SUPABASE_URL sea solo https://xxxx.supabase.co, sin /rest/v1 ni rutas del dashboard."
         return pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
+
+
+def obtener_ventas_supabase_por_referencia(external_reference: str) -> List[Dict[str, Any]]:
+    if not supabase_activo():
+        return []
+    ref = limpiar_valor_id(external_reference)
+    if not ref:
+        return []
+    try:
+        data = (
+            supabase.table("ventas")
+            .select("id_boleto,nombre,correo,evento,numero_boleto,precio,metodo_pago,codigo_pago,fecha_compra,telefono,estado_pago,external_reference,stripe_payment_id,stripe_session_id,mercadopago_payment_id,mercadopago_preference_id,proveedor_pago")
+            .eq("external_reference", ref)
+            .order("numero_boleto")
+            .execute()
+            .data
+            or []
+        )
+        return [normalizar_venta_supabase(v) for v in data]
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"Consulta ventas Supabase por referencia: {e}"
+        return []
 
 
 def consultar_ventas_supabase_por_boleto_correo(numero_boleto: str, correo: str) -> List[Dict[str, Any]]:
@@ -427,35 +474,75 @@ def consultar_ventas_supabase_por_boleto_correo(numero_boleto: str, correo: str)
     try:
         num = parse_ticket_number(numero_boleto)
         correo_limpio = str(correo or "").strip().lower()
-        data = supabase.table("ventas").select("id_boleto,nombre,correo,evento,numero_boleto,precio,metodo_pago,codigo_pago,fecha_compra,telefono,estado_pago,external_reference,stripe_payment_id,stripe_session_id,mercadopago_payment_id,mercadopago_preference_id,proveedor_pago").eq("numero_boleto", num).eq("correo", correo_limpio).execute().data or []
+        data = (
+            supabase.table("ventas")
+            .select("external_reference")
+            .eq("numero_boleto", num)
+            .eq("correo", correo_limpio)
+            .order("fecha_compra", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
         if not data:
             return []
-        ref = data[-1].get("external_reference", "")
-        ventas_ref = supabase.table("ventas").select("id_boleto,nombre,correo,evento,numero_boleto,precio,metodo_pago,codigo_pago,fecha_compra,telefono,estado_pago,external_reference,stripe_payment_id,stripe_session_id,mercadopago_payment_id,mercadopago_preference_id,proveedor_pago").eq("external_reference", ref).execute().data or []
-        salida = []
-        for v in ventas_ref:
-            salida.append({
-                "ID_Boleto": v.get("id_boleto", ""),
-                "Nombre": v.get("nombre", ""),
-                "Correo": v.get("correo", ""),
-                "Evento": v.get("evento", NOMBRE_EVENTO),
-                "Numero_Boleto": parse_ticket_number(v.get("numero_boleto", "")),
-                "Precio": v.get("precio", ""),
-                "Metodo_Pago": v.get("metodo_pago", ""),
-                "Codigo_Pago": v.get("codigo_pago", ""),
-                "Fecha_Compra": v.get("fecha_compra", ""),
-                "Numero_Telefonico": v.get("telefono", ""),
-                "Estado_Pago": v.get("estado_pago", "VENDIDO"),
-                "Referencia_Pago": v.get("external_reference", ""),
-                "MercadoPago_Payment_ID": v.get("mercadopago_payment_id", ""),
-                "MercadoPago_Preference_ID": v.get("mercadopago_preference_id", ""),
-                "Stripe_Payment_ID": v.get("stripe_payment_id", ""),
-                "Stripe_Session_ID": v.get("stripe_session_id", ""),
-                "Proveedor_Pago": v.get("proveedor_pago", ""),
-            })
-        return salida
+        ref = data[0].get("external_reference", "")
+        return obtener_ventas_supabase_por_referencia(ref)
     except Exception:
         return []
+
+
+def confirmar_pago_supabase_desde_app(payment_info: Dict[str, Any]) -> Tuple[bool, str]:
+    if not supabase_activo():
+        return False, "Supabase no esta activo en la app."
+    try:
+        proveedor = obtener_proveedor_pago(payment_info)
+        ext_ref = obtener_external_reference_pago(payment_info)
+        pago_id = obtener_payment_id_pago(payment_info)
+        monto_pagado = obtener_monto_pagado(payment_info)
+        moneda = obtener_moneda_pago(payment_info)
+        session_id = limpiar_valor_id(payment_info.get("provider_session_id", "")) or limpiar_valor_id(payment_info.get("stripe_session_id", ""))
+        preference_id = limpiar_valor_id(payment_info.get("mp_preference_id", "")) or limpiar_valor_id(payment_info.get("preference_id", ""))
+        metodo_pago = limpiar_valor_id(payment_info.get("payment_type_id", proveedor.lower()))
+        if not ext_ref:
+            return False, "No se recibio external_reference."
+        if not pago_id:
+            return False, "No se recibio payment_id."
+        params = {
+            "p_provider": proveedor,
+            "p_external_reference": ext_ref,
+            "p_payment_id": pago_id,
+            "p_session_id": session_id,
+            "p_preference_id": preference_id,
+            "p_monto_pagado": monto_pagado,
+            "p_moneda": moneda,
+            "p_metodo_pago": metodo_pago,
+            "p_evento": NOMBRE_EVENTO,
+            "p_payload": {},
+        }
+        supabase.rpc("confirmar_pago_y_vender", params).execute()
+        return True, "Pago confirmado en Supabase."
+    except Exception as e:
+        st.session_state.ultimo_error_pago = f"Confirmacion Supabase desde app: {e}"
+        return False, str(e)
+
+
+def finalizar_pago_confirmado_app(conn: GSheetsConnection, pago: Dict[str, Any], external_reference: str) -> List[Dict[str, Any]]:
+    ref = limpiar_valor_id(external_reference) or obtener_external_reference_pago(pago)
+    if supabase_activo():
+        confirmar_pago_supabase_desde_app(pago)
+        ventas_supabase = obtener_ventas_supabase_por_referencia(ref)
+        if ventas_supabase:
+            return ventas_supabase
+    datos_sheets = actualizar_pago_en_hojas(conn, pago)
+    if datos_sheets:
+        return datos_sheets
+    if supabase_activo():
+        ventas_supabase = obtener_ventas_supabase_por_referencia(ref)
+        if ventas_supabase:
+            return ventas_supabase
+    return []
 
 # ============================================================
 # GOOGLE SHEETS CONTROL DE CUOTA
@@ -828,17 +915,17 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
         if not ordenes:
             return False, "No hay boletos para reservar."
 
-        # Nueva fuente principal: Supabase transaccional.
-        # Si falla Supabase, no se genera link de pago para evitar ventas sin reserva transaccional.
+        # Supabase es la fuente transaccional principal.
+        # Si Supabase falla, se bloquea el pago para evitar cobros sin reserva transaccional.
         if supabase_activo():
             ok_supabase, msg_supabase = reservar_boletos_supabase(ordenes)
             if not ok_supabase:
                 return False, msg_supabase
 
+        # Google Sheets queda como copia visual temporal.
         numeros_boletos = [parse_ticket_number(o.get("Numero_Boleto", "")) for o in ordenes]
         df_v_actual = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
         if obtener_error_lectura_sheets():
-            # La reserva transaccional ya quedo en Supabase; no bloqueamos el pago solo por la copia visual.
             return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
         df_r_actual = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
         if obtener_error_lectura_sheets():
@@ -1028,10 +1115,38 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
     if not datos_boletos:
         st.warning("No hay boletos disponibles para generar PDF.")
         return
-    archivo_pdf = generar_pdf_boleto(datos_boletos)
+
+    boletos_unicos = []
+    vistos = set()
+    for boleto in datos_boletos:
+        numero = parse_ticket_number(boleto.get("Numero_Boleto", ""))
+        if numero and numero not in vistos:
+            vistos.add(numero)
+            boletos_unicos.append(boleto)
+
+    if not boletos_unicos:
+        st.warning("No hay boletos validos para generar PDF.")
+        return
+
+    archivo_pdf = generar_pdf_boleto(boletos_unicos)
     with open(archivo_pdf, "rb") as pdf_file:
         pdf_bytes = pdf_file.read()
-    st.download_button(label="🎟️ Descargar boleto en PDF" if len(datos_boletos) == 1 else "🎟️ Descargar boletos en PDF", data=pdf_bytes, file_name=archivo_pdf, mime="application/pdf", type="primary", use_container_width=True)
+
+    label = "🎟️ Descargar boleto en PDF" if len(boletos_unicos) == 1 else "🎟️ Descargar boletos en PDF"
+    contador_pdf = int(st.session_state.get("_pdf_download_counter", 0)) + 1
+    st.session_state["_pdf_download_counter"] = contador_pdf
+    boletos_key = "_".join([parse_ticket_number(b.get("Numero_Boleto", "")) for b in boletos_unicos])
+
+    st.download_button(
+        label=label,
+        data=pdf_bytes,
+        file_name=archivo_pdf,
+        mime="application/pdf",
+        type="primary",
+        use_container_width=True,
+        key=f"download_pdf_{boletos_key}_{contador_pdf}"
+    )
+
 
 # ============================================================
 # PAGOS
@@ -1218,6 +1333,7 @@ def recuperar_boletos_por_reserva(conn, numero_boleto, correo):
     datos_supabase = consultar_ventas_supabase_por_boleto_correo(numero_boleto, correo)
     if datos_supabase:
         return datos_supabase
+
     df_v = leer_ventas(conn, ttl_segundos=3)
     correo_limpio = correo.strip().lower()
     num = parse_ticket_number(numero_boleto)
@@ -1253,7 +1369,7 @@ def recuperar_boletos_por_reserva(conn, numero_boleto, correo):
     if not pago:
         pago = buscar_pago_stripe_payment_intent_por_correo_fecha(ext_ref, correo_limpio, total, fecha)
     if pago:
-        datos = actualizar_pago_en_hojas(conn, pago)
+        datos = finalizar_pago_confirmado_app(conn, pago, ext_ref)
         if datos:
             return datos
         df_v = leer_ventas(conn, ttl_segundos=3)
@@ -1278,7 +1394,19 @@ def obtener_ventas_por_referencia(conn: GSheetsConnection, external_reference: s
 
 
 def confirmar_si_venta_ya_existe(conn: GSheetsConnection, external_reference: str) -> bool:
-    ventas = obtener_ventas_por_referencia(conn, external_reference)
+    ref = limpiar_valor_id(external_reference)
+
+    ventas_supabase = obtener_ventas_supabase_por_referencia(ref)
+    if ventas_supabase:
+        st.session_state.boletos_confirmados = ventas_supabase
+        st.session_state.payment_success_id = "PAGO_CONFIRMADO"
+        limpiar_carrito_local()
+        st.session_state.boletos_confirmados = ventas_supabase
+        limpiar_checkout_pendiente()
+        limpiar_query_manteniendo_cid()
+        return True
+
+    ventas = obtener_ventas_por_referencia(conn, ref)
     if ventas:
         st.session_state.boletos_confirmados = ventas
         st.session_state.payment_success_id = "PAGO_CONFIRMADO"
@@ -1475,7 +1603,7 @@ def procesar_retorno_pago(conn):
         except Exception as e:
             st.session_state.ultimo_error_pago = f"MP return get: {e}"
         if pago:
-            datos = actualizar_pago_en_hojas(conn, pago)
+            datos = finalizar_pago_confirmado_app(conn, pago, ext_ref)
             st.session_state.boletos_confirmados = datos
             st.session_state.payment_success_id = "PAGO_CONFIRMADO"
             limpiar_carrito_local()
@@ -1495,7 +1623,7 @@ def procesar_retorno_pago(conn):
             st.rerun()
         pago = obtener_pago_stripe(stripe_session_id, ext_ref if ext_ref else None)
         if pago:
-            datos = actualizar_pago_en_hojas(conn, pago)
+            datos = finalizar_pago_confirmado_app(conn, pago, ext_ref)
             st.session_state.boletos_confirmados = datos
             st.session_state.payment_success_id = "PAGO_CONFIRMADO"
             limpiar_carrito_local()
