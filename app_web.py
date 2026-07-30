@@ -1075,7 +1075,7 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     """
     Genera un PDF con una pagina unica por cada boleto comprado.
     Cada numero de boleto tiene su propio espacio, encabezado, ID visual,
-    datos del comprador, precio, metodo de pago y validacion.
+    datos del comprador, precio y metodo de pago, sin mostrar referencia/proveedor en la impresion.
     """
     if not datos_boletos:
         return "Boleto_Sin_Datos.pdf"
@@ -1190,25 +1190,6 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
             ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
         ]))
         story.append(detalle)
-        story.append(Spacer(1, 20))
-
-        validacion = Table(
-            [
-                [Paragraph("<b>VALIDACION DEL BOLETO</b>", estilo_bold), Paragraph(id_visual, estilo_celda)],
-                [Paragraph("<b>Referencia:</b>", estilo_bold), Paragraph(str(boleto.get("Referencia_Pago", "")), estilo_celda)],
-                [Paragraph("<b>Proveedor:</b>", estilo_bold), Paragraph(str(boleto.get("Proveedor_Pago", "Pago electronico")).upper(), estilo_celda)],
-            ],
-            colWidths=[160, 340]
-        )
-        validacion.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#991B1B")),
-            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#FCA5A5")),
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#FEE2E2")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ]))
-        story.append(validacion)
 
         if idx < len(boletos_unicos) - 1:
             story.append(PageBreak())
