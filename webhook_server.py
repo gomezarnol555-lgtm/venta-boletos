@@ -6,7 +6,7 @@ import random
 import time
 import threading
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import stripe
@@ -16,7 +16,13 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from google.oauth2.service_account import Credentials
 
-app = FastAPI(title="Webhook Pagos Rifa", version="3.0.0")
+try:
+    from supabase import create_client, Client
+except Exception:
+    create_client = None
+    Client = None
+
+app = FastAPI(title="Webhook Pagos Rifa", version="4.0.0-supabase")
 
 # ============================================================
 # CONFIGURACION POR VARIABLES DE ENTORNO
@@ -31,22 +37,28 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "").strip()
 MP_WEBHOOK_SECRET = os.getenv("MP_WEBHOOK_SECRET", "").strip()
 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
 DEFAULT_EVENTO = os.getenv("DEFAULT_EVENTO", "Rifa de Celular").strip()
 DEFAULT_CURRENCY_MP = os.getenv("MP_CURRENCY_ID", "MXN").strip().upper()
 DEFAULT_CURRENCY_STRIPE = os.getenv("STRIPE_CURRENCY_ID", "mxn").strip().lower()
 TOTAL_BOLETOS = int(os.getenv("TOTAL_BOLETOS", "100"))
 DIGITOS_BOLETO = max(1, len(str(max(TOTAL_BOLETOS - 1, 0))))
 MP_SIGNATURE_TOLERANCE_SECONDS = int(os.getenv("MP_SIGNATURE_TOLERANCE_SECONDS", "300"))
+COPIAR_A_SHEETS = os.getenv("COPIAR_A_SHEETS", "true").strip().lower() in ["1", "true", "si", "yes", "on"]
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
-# Lock local para reducir carreras dentro de una misma instancia.
-# Nota: para produccion de alto volumen se recomienda una base transaccional.
+supabase: Optional[Client] = None
+if create_client is not None and SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
 SHEETS_LOCK = threading.Lock()
 
 # ============================================================
-# COLUMNAS
+# COLUMNAS GOOGLE SHEETS
 # ============================================================
 def columnas_reservas() -> list:
     return [
@@ -106,7 +118,7 @@ def columnas_auditoria() -> list:
     ]
 
 # ============================================================
-# UTILIDADES GENERALES
+# UTILIDADES
 # ============================================================
 def ahora_txt() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -126,6 +138,13 @@ def parse_ticket_number(valor: Any) -> str:
         return f"{int(float(valor)):0{DIGITOS_BOLETO}d}"
     except Exception:
         return str(valor).strip().zfill(DIGITOS_BOLETO)
+
+
+def normalizar_float(valor: Any) -> float:
+    try:
+        return round(float(valor or 0), 2)
+    except Exception:
+        return 0.0
 
 
 def safe_to_dict(obj: Any) -> Dict[str, Any]:
@@ -153,13 +172,6 @@ def safe_get(obj: Any, key: str, default=None):
         return getattr(obj, key)
     except Exception:
         return default
-
-
-def normalizar_float(valor: Any) -> float:
-    try:
-        return round(float(valor or 0), 2)
-    except Exception:
-        return 0.0
 
 
 def asegurar_columnas(df: pd.DataFrame, columnas: list) -> pd.DataFrame:
@@ -193,7 +205,7 @@ def ejecutar_con_reintento(func, *args, **kwargs):
     raise ultimo_error
 
 # ============================================================
-# GOOGLE SHEETS
+# GOOGLE SHEETS OPCIONAL
 # ============================================================
 def cliente_gspread():
     if not SPREADSHEET_ID:
@@ -271,7 +283,7 @@ def append_ventas(filas: List[Dict[str, Any]]) -> None:
     append_worksheet("Ventas", filas, columnas_ventas())
 
 
-def registrar_auditoria(
+def registrar_auditoria_sheets(
     proveedor: str,
     evento: str,
     external_reference: str = "",
@@ -284,6 +296,8 @@ def registrar_auditoria(
     request_id: str = "",
     data_id: str = "",
 ) -> None:
+    if not COPIAR_A_SHEETS or not SPREADSHEET_ID:
+        return
     try:
         fila = {
             "Fecha_Hora": ahora_txt(),
@@ -295,17 +309,16 @@ def registrar_auditoria(
             "Monto": monto,
             "Moneda": moneda,
             "Resultado": resultado,
-            "Mensaje": mensaje[:500],
+            "Mensaje": str(mensaje)[:500],
             "Request_ID": request_id,
             "Data_ID": data_id,
         }
         append_worksheet("Auditoria", [fila], columnas_auditoria())
     except Exception:
-        # Nunca romper el webhook por auditoria.
         pass
 
 # ============================================================
-# FIRMA DE MERCADO PAGO
+# FIRMA MERCADO PAGO
 # ============================================================
 def parsear_header_x_signature(x_signature: str) -> Dict[str, str]:
     partes = {}
@@ -398,7 +411,7 @@ def validar_firma_mercadopago(payload: Dict[str, Any], request: Request) -> str:
     return data_id
 
 # ============================================================
-# VALIDACIONES DE PAGO Y RESERVA
+# NORMALIZACION PAYMENT INFO
 # ============================================================
 def obtener_monto_pagado(payment_info: Dict[str, Any]) -> float:
     proveedor = limpiar_valor(payment_info.get("provider", "")).upper()
@@ -412,13 +425,57 @@ def obtener_monto_pagado(payment_info: Dict[str, Any]) -> float:
 def obtener_moneda_pago(payment_info: Dict[str, Any]) -> str:
     proveedor = limpiar_valor(payment_info.get("provider", "")).upper()
     if proveedor == "STRIPE":
-        return limpiar_valor(payment_info.get("currency", "")).lower()
+        return limpiar_valor(payment_info.get("currency", DEFAULT_CURRENCY_STRIPE)).upper()
     if proveedor == "MERCADO_PAGO":
-        return limpiar_valor(payment_info.get("currency_id", "")).upper()
+        return limpiar_valor(payment_info.get("currency_id", DEFAULT_CURRENCY_MP)).upper()
     return ""
 
+# ============================================================
+# SUPABASE: VENTA TRANSACCIONAL
+# ============================================================
+def confirmar_pago_en_supabase(payment_info: Dict[str, Any], payload_resumen: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if supabase is None:
+        raise RuntimeError("Supabase no configurado. Falta SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY o libreria supabase.")
 
-def validar_pago_contra_reserva(payment_info: Dict[str, Any], grupo_reserva: pd.DataFrame) -> None:
+    proveedor = limpiar_valor(payment_info.get("provider", "")).upper()
+    ext_ref = limpiar_valor(payment_info.get("external_reference", ""))
+    payment_id = limpiar_valor(payment_info.get("id", ""))
+    session_id = limpiar_valor(payment_info.get("stripe_session_id", ""))
+    preference_id = limpiar_valor(payment_info.get("mp_preference_id", ""))
+    monto_pagado = obtener_monto_pagado(payment_info)
+    moneda = obtener_moneda_pago(payment_info)
+    metodo_pago = limpiar_valor(payment_info.get("payment_type_id", proveedor.lower()))
+
+    if not ext_ref:
+        raise ValueError("No se recibio external_reference para Supabase")
+    if not payment_id:
+        raise ValueError("No se recibio payment_id para Supabase")
+
+    payload_limpio = payload_resumen or {}
+
+    params = {
+        "p_provider": proveedor,
+        "p_external_reference": ext_ref,
+        "p_payment_id": payment_id,
+        "p_session_id": session_id,
+        "p_preference_id": preference_id,
+        "p_monto_pagado": monto_pagado,
+        "p_moneda": moneda,
+        "p_metodo_pago": metodo_pago,
+        "p_evento": DEFAULT_EVENTO,
+        "p_payload": payload_limpio,
+    }
+
+    result = supabase.rpc("confirmar_pago_y_vender", params).execute()
+    data = getattr(result, "data", None)
+    if isinstance(data, dict):
+        return data
+    return {"ok": True, "data": data}
+
+# ============================================================
+# GOOGLE SHEETS: COPIA VISUAL OPCIONAL
+# ============================================================
+def validar_pago_contra_reserva_sheets(payment_info: Dict[str, Any], grupo_reserva: pd.DataFrame) -> None:
     proveedor = limpiar_valor(payment_info.get("provider", "")).upper()
     monto_reservado = round(float(grupo_reserva["Monto"].astype(float).sum()), 2)
     monto_pagado = obtener_monto_pagado(payment_info)
@@ -427,17 +484,13 @@ def validar_pago_contra_reserva(payment_info: Dict[str, Any], grupo_reserva: pd.
     if abs(monto_pagado - monto_reservado) > 0.01:
         raise ValueError(f"Monto pagado no coincide. Pagado={monto_pagado:.2f}, Reservado={monto_reservado:.2f}")
 
-    if proveedor == "STRIPE":
-        if moneda_pago != DEFAULT_CURRENCY_STRIPE.lower():
-            raise ValueError(f"Moneda Stripe incorrecta. Pago={moneda_pago}, Esperada={DEFAULT_CURRENCY_STRIPE.lower()}")
-    elif proveedor == "MERCADO_PAGO":
-        if moneda_pago != DEFAULT_CURRENCY_MP.upper():
-            raise ValueError(f"Moneda Mercado Pago incorrecta. Pago={moneda_pago}, Esperada={DEFAULT_CURRENCY_MP.upper()}")
-    else:
-        raise ValueError("Proveedor de pago no reconocido")
+    if proveedor == "STRIPE" and moneda_pago != DEFAULT_CURRENCY_STRIPE.upper():
+        raise ValueError(f"Moneda Stripe incorrecta. Pago={moneda_pago}, Esperada={DEFAULT_CURRENCY_STRIPE.upper()}")
+    if proveedor == "MERCADO_PAGO" and moneda_pago != DEFAULT_CURRENCY_MP.upper():
+        raise ValueError(f"Moneda Mercado Pago incorrecta. Pago={moneda_pago}, Esperada={DEFAULT_CURRENCY_MP.upper()}")
 
 
-def validar_boletos_no_vendidos(grupo_reserva: pd.DataFrame, df_v: pd.DataFrame) -> None:
+def validar_boletos_no_vendidos_sheets(grupo_reserva: pd.DataFrame, df_v: pd.DataFrame) -> None:
     boletos_reserva = set(grupo_reserva["Numero_Boleto"].astype(str).apply(parse_ticket_number).tolist())
     boletos_vendidos = set(
         df_v[df_v["Estado_Pago"].astype(str).str.upper().isin(["VENDIDO", "APROBADO"])]
@@ -445,12 +498,13 @@ def validar_boletos_no_vendidos(grupo_reserva: pd.DataFrame, df_v: pd.DataFrame)
     )
     conflictos = boletos_reserva.intersection(boletos_vendidos)
     if conflictos:
-        raise ValueError("Boletos ya vendidos previamente: " + ", ".join(sorted(conflictos)))
+        raise ValueError("Boletos ya vendidos previamente en Sheets: " + ", ".join(sorted(conflictos)))
 
-# ============================================================
-# ACTUALIZACION CENTRAL DE PAGO
-# ============================================================
-def registrar_pago_confirmado(payment_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+
+def copiar_pago_a_sheets(payment_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not COPIAR_A_SHEETS or not SPREADSHEET_ID:
+        return []
+
     ext_ref = limpiar_valor(payment_info.get("external_reference", ""))
     pago_id = limpiar_valor(payment_info.get("id", ""))
     proveedor = limpiar_valor(payment_info.get("provider", "")).upper()
@@ -458,10 +512,8 @@ def registrar_pago_confirmado(payment_info: Dict[str, Any]) -> List[Dict[str, An
     stripe_session_id = limpiar_valor(payment_info.get("stripe_session_id", ""))
     mp_preference_id = limpiar_valor(payment_info.get("mp_preference_id", ""))
 
-    if not ext_ref:
-        raise ValueError("No se recibio external_reference")
-    if not pago_id:
-        raise ValueError("No se recibio payment_id")
+    if not ext_ref or not pago_id:
+        return []
 
     with SHEETS_LOCK:
         df_r = leer_reservas()
@@ -484,11 +536,11 @@ def registrar_pago_confirmado(payment_info: Dict[str, Any]) -> List[Dict[str, An
 
         filtro = df_r["External_Reference"].astype(str) == ext_ref
         if not filtro.any():
-            raise ValueError(f"No existe reserva con External_Reference={ext_ref}")
+            return []
 
         grupo_reserva = df_r[filtro].copy()
-        validar_pago_contra_reserva(payment_info, grupo_reserva)
-        validar_boletos_no_vendidos(grupo_reserva, df_v)
+        validar_pago_contra_reserva_sheets(payment_info, grupo_reserva)
+        validar_boletos_no_vendidos_sheets(grupo_reserva, df_v)
 
         df_r.loc[filtro, "Estado_Reserva"] = "PAGADO"
         df_r.loc[filtro, "Fecha_Actualizacion"] = ahora_txt()
@@ -529,6 +581,45 @@ def registrar_pago_confirmado(payment_info: Dict[str, Any]) -> List[Dict[str, An
         escribir_reservas(df_r)
         append_ventas(nuevas_ventas)
         return nuevas_ventas
+
+
+def procesar_pago_confirmado(payment_info: Dict[str, Any], evento: str, payload_resumen: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    ext_ref = limpiar_valor(payment_info.get("external_reference", ""))
+    pago_id = limpiar_valor(payment_info.get("id", ""))
+    proveedor = limpiar_valor(payment_info.get("provider", "")).upper()
+    session_id = limpiar_valor(payment_info.get("stripe_session_id", ""))
+    monto = obtener_monto_pagado(payment_info)
+    moneda = obtener_moneda_pago(payment_info)
+
+    supabase_result = confirmar_pago_en_supabase(payment_info, payload_resumen)
+
+    sheets_result = []
+    sheets_error = ""
+    if COPIAR_A_SHEETS and SPREADSHEET_ID:
+        try:
+            sheets_result = copiar_pago_a_sheets(payment_info)
+        except Exception as e:
+            sheets_error = str(e)
+
+    registrar_auditoria_sheets(
+        proveedor,
+        evento,
+        external_reference=ext_ref,
+        payment_id=pago_id,
+        session_id=session_id,
+        monto=monto,
+        moneda=moneda,
+        resultado="OK",
+        mensaje=f"Supabase OK. Sheets={len(sheets_result)}. {sheets_error}"[:500],
+    )
+
+    return {
+        "ok": True,
+        "provider": proveedor,
+        "supabase": supabase_result,
+        "sheets_ventas": len(sheets_result),
+        "sheets_error": sheets_error,
+    }
 
 # ============================================================
 # STRIPE
@@ -582,11 +673,12 @@ async def webhook_stripe(request: Request):
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except Exception as e:
-        registrar_auditoria("STRIPE", "signature_error", resultado="ERROR", mensaje=str(e))
+        registrar_auditoria_sheets("STRIPE", "signature_error", resultado="ERROR", mensaje=str(e))
         raise HTTPException(status_code=400, detail=f"Webhook Stripe invalido: {e}")
 
     event_type = safe_get(event, "type", "")
     data_obj = safe_get(safe_get(event, "data", {}), "object", {})
+    data_obj_dict = safe_to_dict(data_obj)
 
     try:
         payment_info = None
@@ -596,23 +688,12 @@ async def webhook_stripe(request: Request):
             payment_info = payment_info_desde_payment_intent(data_obj)
 
         if payment_info and payment_info.get("external_reference"):
-            ventas = registrar_pago_confirmado(payment_info)
-            registrar_auditoria(
-                "STRIPE",
-                event_type,
-                external_reference=payment_info.get("external_reference", ""),
-                payment_id=payment_info.get("id", ""),
-                session_id=payment_info.get("stripe_session_id", ""),
-                monto=obtener_monto_pagado(payment_info),
-                moneda=payment_info.get("currency", ""),
-                resultado="OK",
-                mensaje=f"Ventas registradas={len(ventas)}",
-            )
-            return JSONResponse({"ok": True, "provider": "STRIPE", "ventas": len(ventas)})
+            resultado = procesar_pago_confirmado(payment_info, event_type, data_obj_dict)
+            return JSONResponse(resultado)
 
         return JSONResponse({"ok": True, "ignored": True, "event_type": event_type})
     except Exception as e:
-        registrar_auditoria("STRIPE", event_type, resultado="ERROR", mensaje=str(e))
+        registrar_auditoria_sheets("STRIPE", event_type, resultado="ERROR", mensaje=str(e))
         raise HTTPException(status_code=500, detail=f"Error procesando Stripe: {e}")
 
 # ============================================================
@@ -663,7 +744,7 @@ async def webhook_mercadopago(request: Request):
     try:
         data_id = validar_firma_mercadopago(payload, request)
     except HTTPException as e:
-        registrar_auditoria("MERCADO_PAGO", "signature_error", resultado="ERROR", mensaje=str(e.detail), data_id=data_id)
+        registrar_auditoria_sheets("MERCADO_PAGO", "signature_error", resultado="ERROR", mensaje=str(e.detail), data_id=data_id)
         raise
 
     payment_id = obtener_payment_id_mp(payload, request)
@@ -680,24 +761,13 @@ async def webhook_mercadopago(request: Request):
         payment_info = payment_info_desde_mp(pago) if pago else None
 
         if payment_info and payment_info.get("external_reference"):
-            ventas = registrar_pago_confirmado(payment_info)
-            registrar_auditoria(
-                "MERCADO_PAGO",
-                topic or "payment",
-                external_reference=payment_info.get("external_reference", ""),
-                payment_id=payment_info.get("id", ""),
-                monto=obtener_monto_pagado(payment_info),
-                moneda=payment_info.get("currency_id", ""),
-                resultado="OK",
-                mensaje=f"Ventas registradas={len(ventas)}",
-                request_id=request.headers.get("x-request-id", ""),
-                data_id=data_id,
-            )
-            return JSONResponse({"ok": True, "provider": "MERCADO_PAGO", "ventas": len(ventas)})
+            resultado = procesar_pago_confirmado(payment_info, topic or "payment", pago or payload)
+            resultado["data_id"] = data_id
+            return JSONResponse(resultado)
 
         return JSONResponse({"ok": True, "ignored": True, "payment_id": payment_id})
     except Exception as e:
-        registrar_auditoria("MERCADO_PAGO", topic or "payment", payment_id=payment_id, resultado="ERROR", mensaje=str(e), data_id=data_id)
+        registrar_auditoria_sheets("MERCADO_PAGO", topic or "payment", payment_id=payment_id, resultado="ERROR", mensaje=str(e), data_id=data_id)
         raise HTTPException(status_code=500, detail=f"Error procesando Mercado Pago: {e}")
 
 # ============================================================
@@ -705,7 +775,7 @@ async def webhook_mercadopago(request: Request):
 # ============================================================
 @app.get("/")
 def root():
-    return {"ok": True, "service": "webhook-pagos-rifa-seguro", "version": app.version}
+    return {"ok": True, "service": "webhook-pagos-rifa-supabase", "version": app.version}
 
 
 @app.get("/health")
@@ -713,10 +783,14 @@ def health():
     return {
         "ok": True,
         "spreadsheet_configurado": bool(SPREADSHEET_ID),
+        "copiar_a_sheets": COPIAR_A_SHEETS,
         "stripe_configurado": bool(STRIPE_SECRET_KEY),
         "stripe_webhook_secret_configurado": bool(STRIPE_WEBHOOK_SECRET),
         "mp_configurado": bool(MP_ACCESS_TOKEN),
         "mp_webhook_secret_configurado": bool(MP_WEBHOOK_SECRET),
+        "supabase_url_configurado": bool(SUPABASE_URL),
+        "supabase_service_role_configurado": bool(SUPABASE_SERVICE_ROLE_KEY),
+        "supabase_cliente_activo": supabase is not None,
         "total_boletos": TOTAL_BOLETOS,
         "digitos_boleto": DIGITOS_BOLETO,
     }
