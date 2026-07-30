@@ -14,7 +14,7 @@ from streamlit_gsheets import GSheetsConnection
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
 
 try:
     import mercadopago
@@ -141,6 +141,81 @@ CSS_CUSTOM = """
     border-color: #94A3B8 !important;
     color: #334155 !important;
     border-style: dashed !important;
+}
+
+
+/* ============================================================
+   BOLETO SELECCIONADO EN NEGRO
+   ============================================================ */
+.st-key-mapa_boletos_grid [data-testid="stButton"] button[kind="primary"] {
+    background: linear-gradient(135deg, #111827, #000000) !important;
+    color: #FFFFFF !important;
+    border: 2px dashed #000000 !important;
+    box-shadow: 0 5px 12px rgba(0,0,0,0.30) !important;
+}
+
+.st-key-mapa_boletos_grid [data-testid="stButton"] button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #000000, #1F2937) !important;
+    transform: translateY(-2px) scale(1.03) !important;
+}
+
+/* ============================================================
+   BOTONES DE PAGO MAS RAPIDOS Y TIPO TICKET
+   ============================================================ */
+.st-key-btn_pago_opcion_mp button,
+.st-key-btn_pago_opcion_stripe button,
+.st-key-btn_elegir_mp button,
+.st-key-btn_elegir_stripe button {
+    min-height: 62px !important;
+    border-radius: 16px !important;
+    border-style: dashed !important;
+    border-width: 2px !important;
+    font-weight: 950 !important;
+    letter-spacing: .2px !important;
+    transition: all .14s ease-in-out !important;
+    box-shadow: 0 4px 10px rgba(15,23,42,.12) !important;
+}
+
+.st-key-btn_pago_opcion_mp button,
+.st-key-btn_elegir_mp button {
+    background: linear-gradient(145deg,#D1FAE5,#ECFDF5) !important;
+    border-color: #10B981 !important;
+    color: #064E3B !important;
+}
+
+.st-key-btn_pago_opcion_stripe button,
+.st-key-btn_elegir_stripe button {
+    background: linear-gradient(145deg,#DBEAFE,#EFF6FF) !important;
+    border-color: #2563EB !important;
+    color: #1E3A8A !important;
+}
+
+.st-key-btn_pago_opcion_mp button:hover,
+.st-key-btn_pago_opcion_stripe button:hover,
+.st-key-btn_elegir_mp button:hover,
+.st-key-btn_elegir_stripe button:hover {
+    transform: translateY(-2px) scale(1.012) !important;
+    box-shadow: 0 8px 18px rgba(15,23,42,.18) !important;
+}
+
+.st-key-btn_realizar_pago_directo a,
+.st-key-btn_realizar_pago_directo button,
+[data-testid="stLinkButton"] a {
+    min-height: 56px !important;
+    border-radius: 14px !important;
+    background: linear-gradient(135deg,#DC2626,#7F1D1D) !important;
+    color: #FFFFFF !important;
+    border: 0 !important;
+    font-weight: 950 !important;
+    box-shadow: 0 7px 18px rgba(220,38,38,.32) !important;
+    transition: all .14s ease-in-out !important;
+}
+
+.st-key-btn_realizar_pago_directo a:hover,
+.st-key-btn_realizar_pago_directo button:hover,
+[data-testid="stLinkButton"] a:hover {
+    transform: translateY(-2px) scale(1.008) !important;
+    box-shadow: 0 9px 20px rgba(153,27,27,.36) !important;
 }
 
 </style>
@@ -810,41 +885,114 @@ def dibujar_fondo_autenticidad(canvas, doc):
 
 
 def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
+    """Genera un PDF tipo ticket con una pagina independiente por cada boleto comprado."""
+    if not datos_boletos:
+        return "Boleto_Sin_Datos.pdf"
+
     boletos_txt = texto_boletos(datos_boletos) or "N/A"
     nombre_archivo = f"Boleto_{boletos_txt.replace(', ', '_')}.pdf"
-    doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=46, leftMargin=46, topMargin=70, bottomMargin=50)
+
+    doc = SimpleDocTemplate(
+        nombre_archivo,
+        pagesize=letter,
+        rightMargin=46,
+        leftMargin=46,
+        topMargin=70,
+        bottomMargin=50
+    )
+
     story = []
     styles = getSampleStyleSheet()
+
     estilo_titulo = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.white, alignment=1)
     estilo_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=9.5, textColor=colors.HexColor("#E2E8F0"), alignment=1)
     estilo_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#334155"))
     estilo_bold = ParagraphStyle("Bold", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#0A2540"))
-    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=26, leading=32, textColor=colors.HexColor("#0A2540"), alignment=1)
+    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=28, leading=34, textColor=colors.HexColor("#991B1B"), alignment=1)
     estilo_evento = ParagraphStyle("Evento", parent=styles["Heading2"], fontSize=13, leading=16, textColor=colors.HexColor("#0A2540"), alignment=1)
     estilo_mensaje = ParagraphStyle("Mensaje", parent=styles["Normal"], fontSize=8.7, leading=11, textColor=colors.HexColor("#475569"), alignment=1)
-    encabezado = Table([[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]], colWidths=[500])
-    encabezado.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
-    story += [encabezado, Spacer(1, 22)]
-    resumen = Table([[Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)], [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)], [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de validacion", estilo_bold)], [Paragraph(boletos_txt, estilo_num), Paragraph(f"Bol-{boletos_txt}", estilo_num)]], colWidths=[250, 250])
-    resumen.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")), ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")), ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#CBD5E1")), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
-    story += [resumen, Spacer(1, 18)]
-    mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
-    mensaje.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")), ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#CBD5E1")), ("TOPPADDING", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 9)]))
-    story += [mensaje, Spacer(1, 18)]
-    filas = []
-    for boleto in datos_boletos:
+
+    for idx, boleto in enumerate(datos_boletos):
         numero_boleto = parse_ticket_number(boleto.get("Numero_Boleto", ""))
-        fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0] or datetime.now().strftime("%Y-%m-%d")
+        id_visual = f"Bol-{numero_boleto}"
+
         try:
             precio_txt = f"${float(boleto.get('Precio', 0) or 0):.2f} {MP_CURRENCY_ID}"
         except Exception:
             precio_txt = str(boleto.get("Precio", ""))
-        filas.extend([[Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(f"Bol-{numero_boleto}", estilo_celda)], [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)], [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)], [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)], [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)], [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)]])
-        if len(datos_boletos) > 1:
-            filas.append([Paragraph("", estilo_celda), Paragraph("", estilo_celda)])
-    detalle = Table(filas, colWidths=[160, 340])
-    detalle.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .9, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#E2E8F0")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
-    story.append(detalle)
+
+        fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0]
+        if not fecha_compra:
+            fecha_compra = datetime.now().strftime("%Y-%m-%d")
+
+        encabezado = Table(
+            [[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]],
+            colWidths=[500]
+        )
+        encabezado.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ]))
+
+        story.append(encabezado)
+        story.append(Spacer(1, 22))
+
+        resumen = Table(
+            [
+                [Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)],
+                [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
+                [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de validacion", estilo_bold)],
+                [Paragraph(numero_boleto, estilo_num), Paragraph(id_visual, estilo_num)],
+            ],
+            colWidths=[250, 250]
+        )
+        resumen.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
+            ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")),
+            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#0A2540")),
+            ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#CBD5E1")),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(resumen)
+        story.append(Spacer(1, 18))
+
+        mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
+        mensaje.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+            ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#CBD5E1")),
+            ("TOPPADDING", (0, 0), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ]))
+        story.append(mensaje)
+        story.append(Spacer(1, 18))
+
+        filas = [
+            [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(id_visual, estilo_celda)],
+            [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
+            [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)],
+            [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)],
+            [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)],
+            [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)],
+        ]
+
+        detalle = Table(filas, colWidths=[160, 340])
+        detalle.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), .9, colors.HexColor("#0A2540")),
+            ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#E2E8F0")),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        story.append(detalle)
+
+        if idx < len(datos_boletos) - 1:
+            story.append(PageBreak())
+
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
 
@@ -853,10 +1001,20 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
     if not datos_boletos:
         st.warning("No hay boletos disponibles para generar PDF.")
         return
+
     archivo_pdf = generar_pdf_boleto(datos_boletos)
     with open(archivo_pdf, "rb") as pdf_file:
         pdf_bytes = pdf_file.read()
-    st.download_button(label="🎟️ Descargar boleto en PDF" if len(datos_boletos) == 1 else "🎟️ Descargar boletos en PDF", data=pdf_bytes, file_name=archivo_pdf, mime="application/pdf", type="primary", use_container_width=True)
+
+    st.download_button(
+        label="🎟️ Descargar boleto en PDF" if len(datos_boletos) == 1 else "🎟️ Descargar boletos en PDF",
+        data=pdf_bytes,
+        file_name=archivo_pdf,
+        mime="application/pdf",
+        type="primary",
+        use_container_width=True
+    )
+
 
 # ============================================================
 # PAGOS
@@ -1230,7 +1388,7 @@ def renderizar_mapa_interactivo():
         elif estado == "pre_reservado_otros":
             fondo, borde, color = "linear-gradient(145deg,#E2E8F0,#F8FAFC)", "#64748B", "#334155"
         elif estado == "pre_reservado_mio" or num in st.session_state.selected_tickets:
-            fondo, borde, color = "linear-gradient(145deg,#BAE6FD,#E0F2FE)", "#0284C7", "#0A2540"
+            fondo, borde, color = "linear-gradient(145deg,#111827,#000000)", "#000000", "#FFFFFF"
         else:
             fondo, borde, color = "linear-gradient(145deg,#D1FAE5,#F0FDF4)", "#10B981", "#064E3B"
         estilos.append(f"<style>.st-key-btn_{num} button{{background:{fondo}!important;border-color:{borde}!important;color:{color}!important}}</style>")
@@ -1248,10 +1406,11 @@ def renderizar_mapa_interactivo():
                     if estado in ["vendido_db", "reservado_db", "pre_reservado_otros"]:
                         st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help=estado)
                     else:
+                        seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
                         st.button(
                             f"🎟️\n{num}",
                             key=f"btn_{num}",
-                            type="secondary",
+                            type="primary" if seleccionado else "secondary",
                             on_click=alternar_boleto_mapa,
                             args=(num,)
                         )
@@ -1508,7 +1667,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
             checkout = st.session_state.get("checkout_pendiente", {})
             boletos_checkout = [parse_ticket_number(b) for b in checkout.get("boletos", []) if parse_ticket_number(b)]
             errores = []
-            with st.spinner(f"Preparando {metodo}..."):
+            if True:
                 if metodo == "Mercado Pago":
                     try:
                         pref_id, init_point = crear_preferencia_mercado_pago(
@@ -1559,7 +1718,9 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
                         return
 
     if url_pago:
+        st.markdown('<div class="st-key-btn_realizar_pago_directo">', unsafe_allow_html=True)
         st.link_button("✅ Realizar pago", url=url_pago, type="primary", use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
     if st.button("🧹 Cancelar reserva y vaciar carrito", use_container_width=True, key="btn_cancelar_checkout_pendiente"):
