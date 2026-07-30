@@ -5,3 +5,4 @@ reportlab
 st-gsheets-connection
 mercadopago
 stripe
+supabase
