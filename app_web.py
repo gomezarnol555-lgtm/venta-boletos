@@ -67,7 +67,7 @@ def obtener_config(nombre: str, default: str = "") -> str:
 
 
 def normalizar_supabase_project_url(url: str) -> str:
-    """Normaliza SUPABASE_URL para que sea solo la URL raíz del proyecto.
+    """Normaliza SUPABASE_URL para que sea solo la URL raiz del proyecto.
 
     Correcto: https://xxxx.supabase.co
     Incorrecto: https://xxxx.supabase.co/rest/v1
@@ -1072,41 +1072,147 @@ def dibujar_fondo_autenticidad(canvas, doc):
 
 
 def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
-    boletos_txt = texto_boletos(datos_boletos) or "N/A"
+    """
+    Genera un PDF con una pagina unica por cada boleto comprado.
+    Cada numero de boleto tiene su propio espacio, encabezado, ID visual,
+    datos del comprador, precio, metodo de pago y validacion.
+    """
+    if not datos_boletos:
+        return "Boleto_Sin_Datos.pdf"
+
+    boletos_unicos = []
+    vistos = set()
+    for boleto in datos_boletos:
+        numero = parse_ticket_number(boleto.get("Numero_Boleto", ""))
+        if numero and numero not in vistos:
+            vistos.add(numero)
+            boletos_unicos.append(boleto)
+
+    if not boletos_unicos:
+        return "Boleto_Sin_Datos.pdf"
+
+    boletos_txt = texto_boletos(boletos_unicos) or "N/A"
     nombre_archivo = f"Boleto_{boletos_txt.replace(', ', '_')}.pdf"
-    doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=46, leftMargin=46, topMargin=70, bottomMargin=50)
+
+    doc = SimpleDocTemplate(
+        nombre_archivo,
+        pagesize=letter,
+        rightMargin=46,
+        leftMargin=46,
+        topMargin=70,
+        bottomMargin=50
+    )
+
     story = []
     styles = getSampleStyleSheet()
+
     estilo_titulo = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.white, alignment=1)
     estilo_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=9.5, textColor=colors.HexColor("#E2E8F0"), alignment=1)
     estilo_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#334155"))
     estilo_bold = ParagraphStyle("Bold", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#0A2540"))
-    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=26, leading=32, textColor=colors.HexColor("#0A2540"), alignment=1)
+    estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=30, leading=36, textColor=colors.HexColor("#991B1B"), alignment=1)
     estilo_evento = ParagraphStyle("Evento", parent=styles["Heading2"], fontSize=13, leading=16, textColor=colors.HexColor("#0A2540"), alignment=1)
     estilo_mensaje = ParagraphStyle("Mensaje", parent=styles["Normal"], fontSize=8.7, leading=11, textColor=colors.HexColor("#475569"), alignment=1)
-    encabezado = Table([[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]], colWidths=[500])
-    encabezado.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
-    story += [encabezado, Spacer(1, 22)]
-    resumen = Table([[Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)], [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)], [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de validacion", estilo_bold)], [Paragraph(boletos_txt, estilo_num), Paragraph(f"Bol-{boletos_txt}", estilo_num)]], colWidths=[250, 250])
-    resumen.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")), ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")), ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#CBD5E1")), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
-    story += [resumen, Spacer(1, 18)]
-    mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
-    mensaje.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")), ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#CBD5E1")), ("TOPPADDING", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 9)]))
-    story += [mensaje, Spacer(1, 18)]
-    filas = []
-    for boleto in datos_boletos:
+
+    for idx, boleto in enumerate(boletos_unicos):
         numero_boleto = parse_ticket_number(boleto.get("Numero_Boleto", ""))
-        fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0] or datetime.now().strftime("%Y-%m-%d")
+        id_visual = f"Bol-{numero_boleto}"
+
         try:
             precio_txt = f"${float(boleto.get('Precio', 0) or 0):.2f} {MP_CURRENCY_ID}"
         except Exception:
             precio_txt = str(boleto.get("Precio", ""))
-        filas.extend([[Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(f"Bol-{numero_boleto}", estilo_celda)], [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)], [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)], [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)], [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)], [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)]])
-        if len(datos_boletos) > 1:
-            filas.append([Paragraph("", estilo_celda), Paragraph("", estilo_celda)])
-    detalle = Table(filas, colWidths=[160, 340])
-    detalle.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .9, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), .35, colors.HexColor("#E2E8F0")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
-    story.append(detalle)
+
+        fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0]
+        if not fecha_compra:
+            fecha_compra = datetime.now().strftime("%Y-%m-%d")
+
+        encabezado = Table(
+            [[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]],
+            colWidths=[500]
+        )
+        encabezado.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ]))
+        story.append(encabezado)
+        story.append(Spacer(1, 22))
+
+        resumen = Table(
+            [
+                [Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)],
+                [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
+                [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de validacion", estilo_bold)],
+                [Paragraph(numero_boleto, estilo_num), Paragraph(id_visual, estilo_num)],
+            ],
+            colWidths=[250, 250]
+        )
+        resumen.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
+            ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")),
+            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#0A2540")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(resumen)
+        story.append(Spacer(1, 18))
+
+        mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
+        mensaje.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#CBD5E1")),
+            ("TOPPADDING", (0, 0), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ]))
+        story.append(mensaje)
+        story.append(Spacer(1, 18))
+
+        filas = [
+            [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(id_visual, estilo_celda)],
+            [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
+            [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)],
+            [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)],
+            [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)],
+            [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)],
+            [Paragraph("<b>Vigencia:</b>", estilo_bold), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_celda)],
+        ]
+        detalle = Table(filas, colWidths=[160, 340])
+        detalle.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#0A2540")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        story.append(detalle)
+        story.append(Spacer(1, 20))
+
+        validacion = Table(
+            [
+                [Paragraph("<b>VALIDACION DEL BOLETO</b>", estilo_bold), Paragraph(id_visual, estilo_celda)],
+                [Paragraph("<b>Referencia:</b>", estilo_bold), Paragraph(str(boleto.get("Referencia_Pago", "")), estilo_celda)],
+                [Paragraph("<b>Proveedor:</b>", estilo_bold), Paragraph(str(boleto.get("Proveedor_Pago", "Pago electronico")).upper(), estilo_celda)],
+            ],
+            colWidths=[160, 340]
+        )
+        validacion.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#991B1B")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#FCA5A5")),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#FEE2E2")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        story.append(validacion)
+
+        if idx < len(boletos_unicos) - 1:
+            story.append(PageBreak())
+
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
 
@@ -1133,9 +1239,9 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
         pdf_bytes = pdf_file.read()
 
     label = "🎟️ Descargar boleto en PDF" if len(boletos_unicos) == 1 else "🎟️ Descargar boletos en PDF"
-    contador_pdf = int(st.session_state.get("_pdf_download_counter", 0)) + 1
-    st.session_state["_pdf_download_counter"] = contador_pdf
     boletos_key = "_".join([parse_ticket_number(b.get("Numero_Boleto", "")) for b in boletos_unicos])
+    ref_key = limpiar_valor_id(boletos_unicos[0].get("Referencia_Pago", "") if boletos_unicos else "")
+    timestamp_key = datetime.now().strftime("%Y%m%d%H%M%S%f")
 
     st.download_button(
         label=label,
@@ -1144,7 +1250,7 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
         mime="application/pdf",
         type="primary",
         use_container_width=True,
-        key=f"download_pdf_{boletos_key}_{contador_pdf}"
+        key=f"download_pdf_{ref_key}_{boletos_key}_{timestamp_key}"
     )
 
 
