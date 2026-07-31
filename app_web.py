@@ -46,7 +46,14 @@ def obtener_config_inicial(nombre: str, default: str = "") -> str:
 # CONFIGURACION GENERAL
 # Cambia solamente estas variables.
 # ============================================================
-TOTAL_BOLETOS = int(obtener_config_inicial("TOTAL_BOLETOS", "100"))
+# ============================================================
+# NUMERO DE BOLETOS EDITABLE
+# Cambia aqui la cantidad total de boletos de la rifa.
+# 100  -> 00 al 99
+# 1000 -> 000 al 999
+# Nota: este valor manda sobre Streamlit Secrets para evitar desfases.
+# ============================================================
+TOTAL_BOLETOS = 100
 PRECIO_BOLETO = 15.00
 NOMBRE_EVENTO = "Gran Rifa"
 FECHA_VIGENCIA_BOLETO = "31/12/2026"
