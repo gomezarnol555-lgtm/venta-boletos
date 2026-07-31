@@ -37,7 +37,7 @@ except Exception:
 # Cambia solamente estas variables.
 # ============================================================
 TOTAL_BOLETOS = 100
-PRECIO_BOLETO = 15.00
+PRECIO_BOLETO = 10.00
 NOMBRE_EVENTO = "Gran Rifa"
 FECHA_VIGENCIA_BOLETO = "31/12/2026"
 MENSAJE_GENERAL_BOLETO = (
