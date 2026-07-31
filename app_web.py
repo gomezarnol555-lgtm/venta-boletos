@@ -1562,6 +1562,14 @@ def confirmar_si_venta_ya_existe(conn: GSheetsConnection, external_reference: st
 
 def obtener_estado_boletos_bd(df_ventas, df_reservas):
     estados = {}
+
+    checkout_actual = st.session_state.get("checkout_pendiente")
+    ref_checkout_actual = ""
+    if isinstance(checkout_actual, dict):
+        ref_checkout_actual = limpiar_valor_id(checkout_actual.get("external_reference", ""))
+    if not ref_checkout_actual:
+        ref_checkout_actual = limpiar_valor_id(st.session_state.get("external_ref_activa", ""))
+
     if not df_reservas.empty and "Numero_Boleto" in df_reservas.columns:
         for _, row in df_reservas.iterrows():
             if str(row.get("Estado_Reserva", "")).strip().upper() in ["PENDIENTE", "ERROR_CONFIRMACION_STRIPE", "ERROR_CONFIRMACION_MERCADO_PAGO"]:
@@ -1571,8 +1579,12 @@ def obtener_estado_boletos_bd(df_ventas, df_reservas):
                     exp = None
                 if exp is None or datetime.now() <= exp:
                     num = parse_ticket_number(row["Numero_Boleto"])
+                    ref_reserva = limpiar_valor_id(row.get("External_Reference", ""))
                     if num:
-                        estados[num] = "reservado_db"
+                        if ref_checkout_actual and ref_reserva == ref_checkout_actual:
+                            estados[num] = "pre_reservado_mio"
+                        else:
+                            estados[num] = "reservado_db"
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
         for _, row in df_ventas.iterrows():
             if str(row.get("Estado_Pago", "")).strip().upper() in ["APROBADO", "VENDIDO"]:
@@ -1580,7 +1592,6 @@ def obtener_estado_boletos_bd(df_ventas, df_reservas):
                 if num:
                     estados[num] = "vendido_db"
     return estados
-
 
 
 def limpiar_cache_mapa():
@@ -1847,7 +1858,13 @@ def sincronizar_checkout_con_seleccion_local():
 
 
 def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[bool, str]:
-    """Antes de pagar, agrega a Reservas los boletos nuevos añadidos al checkout."""
+    """Antes de pagar, sincroniza todos los boletos del checkout.
+
+    Modo rapido:
+    - Si Supabase esta activo, actualiza/crea la reserva completa en Supabase.
+    - Si COPIAR_SHEETS_DESDE_APP=false, no espera a Google Sheets.
+    - Si COPIAR_SHEETS_DESDE_APP=true, deja Sheets como copia visual.
+    """
     checkout = st.session_state.get("checkout_pendiente")
     if not isinstance(checkout, dict):
         return False, "No existe checkout pendiente."
@@ -1857,11 +1874,52 @@ def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[boo
     if not ref or not boletos_checkout:
         return False, "La reserva no contiene referencia o boletos."
 
+    nombre_completo = f"{checkout.get('nombre', '').strip()} {checkout.get('apellidos', '').strip()}".strip()
+    correo = str(checkout.get("correo", "")).strip().lower()
+    telefono = str(checkout.get("telefono", "")).strip()
+
+    # 1. Fuente principal: Supabase.
+    if supabase_activo():
+        ordenes_supabase = []
+        ahora_txt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        expira_txt = (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S")
+        for boleto in boletos_checkout:
+            ordenes_supabase.append({
+                "External_Reference": ref,
+                "MercadoPago_Preference_ID": "",
+                "MercadoPago_Payment_ID": "",
+                "Stripe_Session_ID": "",
+                "Stripe_Payment_ID": "",
+                "Numero_Boleto": boleto,
+                "Nombre": nombre_completo,
+                "Correo": correo,
+                "Numero_Telefonico": telefono,
+                "Monto": float(PRECIO_BOLETO),
+                "Estado_Reserva": "PENDIENTE",
+                "Fecha_Creacion": ahora_txt,
+                "Expira_En": expira_txt,
+                "Fecha_Actualizacion": ahora_txt,
+            })
+
+        ok_supabase, msg_supabase = reservar_boletos_supabase(ordenes_supabase)
+        if not ok_supabase:
+            return False, msg_supabase
+
+        limpiar_cache_mapa()
+        if not COPIAR_SHEETS_DESDE_APP:
+            return True, "Reserva sincronizada en Supabase."
+
+    # 2. Copia visual/fallback Google Sheets.
     df_r = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
     if obtener_error_lectura_sheets():
+        if supabase_activo():
+            return True, "Reserva sincronizada en Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
         return False, obtener_error_lectura_sheets()
+
     df_v = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
     if obtener_error_lectura_sheets():
+        if supabase_activo():
+            return True, "Reserva sincronizada en Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
         return False, obtener_error_lectura_sheets()
 
     ya_reservados_ref = []
@@ -1873,15 +1931,11 @@ def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[boo
         return True, "Reserva sincronizada."
 
     disponible, mensaje = boletos_disponibles_para_reservar(boletos_nuevos, df_v, df_r, external_reference_actual=ref)
-    if not disponible:
+    if not disponible and not supabase_activo():
         return False, mensaje
 
-    nombre_completo = f"{checkout.get('nombre', '').strip()} {checkout.get('apellidos', '').strip()}".strip()
-    correo = str(checkout.get("correo", "")).strip().lower()
-    telefono = str(checkout.get("telefono", "")).strip()
     ahora_txt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     expira_txt = (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S")
-
     nuevas = []
     for boleto in boletos_nuevos:
         nuevas.append({
@@ -1898,7 +1952,7 @@ def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[boo
             "Estado_Reserva": "PENDIENTE",
             "Fecha_Creacion": ahora_txt,
             "Expira_En": expira_txt,
-            "Fecha_Actualizacion": ahora_txt
+            "Fecha_Actualizacion": ahora_txt,
         })
 
     df_final = pd.concat([df_r.dropna(how="all"), preparar_dataframe_para_update(pd.DataFrame(nuevas), columnas_reservas())], ignore_index=True)
@@ -1930,7 +1984,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
 
     st.success(f"✅ Reserva lista para pago: {', '.join(boletos_checkout)}")
     st.write(f"### 💰 Total a pagar: ${total_checkout:.2f} MXN")
-    st.caption("Puedes seguir seleccionando boletos en el mapa. El boton Realizar pago se actualiza con todos los boletos agregados.")
+    st.caption("Puedes agregar o quitar boletos desde el mapa. Si quieres empezar de cero, usa Cancelar reserva y vaciar carrito para liberar los boletos en Supabase.")
 
     st.markdown(f"""
     <style>
