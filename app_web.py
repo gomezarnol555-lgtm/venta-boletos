@@ -67,12 +67,7 @@ def obtener_config(nombre: str, default: str = "") -> str:
 
 
 def normalizar_supabase_project_url(url: str) -> str:
-    """Normaliza SUPABASE_URL para que sea solo la URL raiz del proyecto.
-
-    Correcto: https://xxxx.supabase.co
-    Incorrecto: https://xxxx.supabase.co/rest/v1
-    Incorrecto: https://supabase.com/dashboard/project/xxxx
-    """
+    """Normaliza SUPABASE_URL para que sea solo la URL raiz del proyecto."""
     url = str(url or "").strip().strip(' "\'')
     if not url:
         return ""
@@ -355,7 +350,7 @@ def safe_data_list(obj: Any) -> list:
 
 
 # ============================================================
-# SUPABASE TRANSACCIONAL Y OPTIMIZACION DE VELOCIDAD
+# SUPABASE TRANSACCIONAL, CANCELACION Y OPTIMIZACION DE VELOCIDAD
 # ============================================================
 
 def supabase_activo() -> bool:
@@ -426,6 +421,57 @@ def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]
         return True, "Exito Supabase"
     except Exception as e:
         return False, f"Error Supabase al reservar: {e}"
+
+
+def cancelar_reserva_supabase_por_referencia(external_reference: str, motivo: str = "CANCELADO_USUARIO") -> Tuple[bool, str]:
+    """
+    Libera una reserva pendiente en Supabase cuando el usuario limpia carrito
+    o regresa sin completar el pago.
+    No toca boletos vendidos.
+    """
+    if not supabase_activo():
+        return False, "Supabase no esta activo."
+
+    ref = limpiar_valor_id(external_reference)
+    if not ref:
+        return False, "No hay external_reference para cancelar."
+
+    try:
+        reservas = (
+            supabase.table("reservas")
+            .select("numero_boleto,estado_reserva")
+            .eq("external_reference", ref)
+            .eq("estado_reserva", "PENDIENTE")
+            .execute()
+            .data
+            or []
+        )
+
+        boletos = []
+        for row in reservas:
+            boleto = parse_ticket_number(row.get("numero_boleto", ""))
+            if boleto and boleto not in boletos:
+                boletos.append(boleto)
+
+        ahora_iso = datetime.now().isoformat()
+
+        if boletos:
+            supabase.table("reservas").update({
+                "estado_reserva": motivo,
+                "fecha_actualizacion": ahora_iso,
+            }).eq("external_reference", ref).eq("estado_reserva", "PENDIENTE").execute()
+
+            for boleto in boletos:
+                supabase.table("boletos").update({
+                    "estado": "DISPONIBLE",
+                    "external_reference_actual": None,
+                    "fecha_actualizacion": ahora_iso,
+                }).eq("numero_boleto", boleto).eq("estado", "RESERVADO").eq("external_reference_actual", ref).execute()
+
+        limpiar_cache_mapa()
+        return True, "Reserva liberada correctamente."
+    except Exception as e:
+        return False, f"Error liberando reserva en Supabase: {e}"
 
 
 def leer_mapa_supabase() -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -554,7 +600,6 @@ def finalizar_pago_confirmado_app(conn: GSheetsConnection, pago: Dict[str, Any],
 
 
 def formatear_fecha_pdf(valor: Any) -> str:
-    """Imprime solo fecha en PDF, sin hora."""
     texto = str(valor or "").strip()
     if not texto:
         return datetime.now().strftime("%Y-%m-%d")
@@ -640,14 +685,42 @@ def alternar_boleto_mapa(numero_boleto: str):
         st.session_state.selected_tickets.append(numero_boleto)
 
 
-def limpiar_carrito_local():
+def limpiar_carrito_local(cancelar_reserva_supabase: bool = True):
+    """
+    Limpia carrito local y, si corresponde, libera tambien la reserva pendiente en Supabase.
+
+    Si el pago ya fue confirmado, no cancela la reserva.
+    Si el usuario limpia carrito antes de pagar, libera boletos en Supabase.
+    """
+    ref_para_cancelar = ""
+
+    checkout = st.session_state.get("checkout_pendiente")
+    if isinstance(checkout, dict):
+        ref_para_cancelar = limpiar_valor_id(checkout.get("external_reference", ""))
+
+    if not ref_para_cancelar:
+        ref_para_cancelar = limpiar_valor_id(st.session_state.get("external_ref_activa", ""))
+
+    pago_confirmado = st.session_state.get("payment_success_id") == "PAGO_CONFIRMADO"
+
+    if cancelar_reserva_supabase and not pago_confirmado and ref_para_cancelar:
+        try:
+            cancelar_reserva_supabase_por_referencia(ref_para_cancelar, motivo="CANCELADO_USUARIO")
+        except Exception:
+            pass
+
     pre_reservas = obtener_pre_reservas_globales()
     for boleto in list(st.session_state.get("selected_tickets", [])):
         if boleto in pre_reservas and pre_reservas[boleto].get("session_id") == st.session_state.get("session_id"):
             del pre_reservas[boleto]
+
     st.session_state.selected_tickets = []
     limpiar_enlaces_pago_sin_vaciar_carrito()
     limpiar_checkout_pendiente()
+    try:
+        limpiar_cache_mapa()
+    except Exception:
+        pass
 
 
 def guardar_checkout_pendiente(ref: str, nombre: str, apellidos: str, correo: str, telefono: str, boletos: List[str]):
@@ -932,48 +1005,33 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
         if not ordenes:
             return False, "No hay boletos para reservar."
 
-        # MODO RAPIDO:
-        # Supabase es la base transaccional principal.
-        # Si Supabase esta activo, la app reserva ahi y continua sin esperar Google Sheets.
         if supabase_activo():
             ok_supabase, msg_supabase = reservar_boletos_supabase(ordenes)
             if not ok_supabase:
                 return False, msg_supabase
-
             limpiar_cache_mapa()
-
-            # Recomendado para velocidad: false.
-            # Si quieres copia visual en Sheets desde la app, activa COPIAR_SHEETS_DESDE_APP=true.
             if not COPIAR_SHEETS_DESDE_APP:
                 return True, "Exito Supabase"
 
-        # Fallback o copia visual a Google Sheets.
         numeros_boletos = [parse_ticket_number(o.get("Numero_Boleto", "")) for o in ordenes]
-
         df_v_actual = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
         if obtener_error_lectura_sheets():
             if supabase_activo():
                 return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
             return False, obtener_error_lectura_sheets()
-
         df_r_actual = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
         if obtener_error_lectura_sheets():
             if supabase_activo():
                 return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
             return False, obtener_error_lectura_sheets()
-
         df_r_actual = liberar_reservas_previas_mismo_cliente(df_r_actual, ordenes)
         disponible, mensaje = boletos_disponibles_para_reservar(numeros_boletos, df_v_actual, df_r_actual)
-
         if not disponible and not supabase_activo():
             return False, mensaje
-
         df_nuevo = preparar_dataframe_para_update(pd.DataFrame(ordenes), columnas_reservas())
         df_actualizado = pd.concat([df_r_actual.dropna(how="all"), df_nuevo], ignore_index=True)
-
         conn.update(worksheet="Reservas", data=preparar_dataframe_para_update(df_actualizado, columnas_reservas()))
         limpiar_cache_mapa()
-
         return True, "Exito"
     except Exception as e:
         return False, str(e)
@@ -1112,7 +1170,6 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     """Genera un PDF con una pagina unica por cada boleto comprado."""
     if not datos_boletos:
         return "Boleto_Sin_Datos.pdf"
-
     boletos_unicos = []
     vistos = set()
     for boleto in datos_boletos:
@@ -1120,16 +1177,13 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         if numero and numero not in vistos:
             vistos.add(numero)
             boletos_unicos.append(boleto)
-
     if not boletos_unicos:
         return "Boleto_Sin_Datos.pdf"
-
     boletos_txt = texto_boletos(boletos_unicos) or "N/A"
     nombre_archivo = f"Boleto_{boletos_txt.replace(', ', '_')}.pdf"
     doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=46, leftMargin=46, topMargin=70, bottomMargin=50)
     story = []
     styles = getSampleStyleSheet()
-
     estilo_titulo = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.white, alignment=1)
     estilo_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=9.5, textColor=colors.HexColor("#E2E8F0"), alignment=1)
     estilo_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=10.5, leading=13, textColor=colors.HexColor("#334155"))
@@ -1141,14 +1195,11 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     for idx, boleto in enumerate(boletos_unicos):
         numero_boleto = parse_ticket_number(boleto.get("Numero_Boleto", ""))
         id_visual = f"Bol-{numero_boleto}"
-
         try:
             precio_txt = f"${float(boleto.get('Precio', 0) or 0):.2f} {MP_CURRENCY_ID}"
         except Exception:
             precio_txt = str(boleto.get("Precio", ""))
-
         fecha_compra = formatear_fecha_pdf(boleto.get("Fecha_Compra", ""))
-
         encabezado = Table([[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]], colWidths=[500])
         encabezado.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
@@ -1158,7 +1209,6 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         ]))
         story.append(encabezado)
         story.append(Spacer(1, 22))
-
         resumen = Table([
             [Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)],
             [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
@@ -1176,7 +1226,6 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         ]))
         story.append(resumen)
         story.append(Spacer(1, 18))
-
         mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
         mensaje.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
@@ -1186,7 +1235,6 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         ]))
         story.append(mensaje)
         story.append(Spacer(1, 18))
-
         filas = [
             [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(id_visual, estilo_celda)],
             [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
@@ -1206,10 +1254,8 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
             ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
         ]))
         story.append(detalle)
-
         if idx < len(boletos_unicos) - 1:
             story.append(PageBreak())
-
     doc.build(story, onFirstPage=dibujar_fondo_autenticidad, onLaterPages=dibujar_fondo_autenticidad)
     return nombre_archivo
 
@@ -1218,7 +1264,6 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
     if not datos_boletos:
         st.warning("No hay boletos disponibles para generar PDF.")
         return
-
     boletos_unicos = []
     vistos = set()
     for boleto in datos_boletos:
@@ -1226,20 +1271,16 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
         if numero and numero not in vistos:
             vistos.add(numero)
             boletos_unicos.append(boleto)
-
     if not boletos_unicos:
         st.warning("No hay boletos validos para generar PDF.")
         return
-
     archivo_pdf = generar_pdf_boleto(boletos_unicos)
     with open(archivo_pdf, "rb") as pdf_file:
         pdf_bytes = pdf_file.read()
-
     label = "🎟️ Descargar boleto en PDF" if len(boletos_unicos) == 1 else "🎟️ Descargar boletos en PDF"
     boletos_key = "_".join([parse_ticket_number(b.get("Numero_Boleto", "")) for b in boletos_unicos])
     ref_key = limpiar_valor_id(boletos_unicos[0].get("Referencia_Pago", "") if boletos_unicos else "")
     timestamp_key = datetime.now().strftime("%Y%m%d%H%M%S%f")
-
     st.download_button(
         label=label,
         data=pdf_bytes,
@@ -1498,22 +1539,20 @@ def obtener_ventas_por_referencia(conn: GSheetsConnection, external_reference: s
 
 def confirmar_si_venta_ya_existe(conn: GSheetsConnection, external_reference: str) -> bool:
     ref = limpiar_valor_id(external_reference)
-
     ventas_supabase = obtener_ventas_supabase_por_referencia(ref)
     if ventas_supabase:
         st.session_state.boletos_confirmados = ventas_supabase
         st.session_state.payment_success_id = "PAGO_CONFIRMADO"
-        limpiar_carrito_local()
+        limpiar_carrito_local(cancelar_reserva_supabase=False)
         st.session_state.boletos_confirmados = ventas_supabase
         limpiar_checkout_pendiente()
         limpiar_query_manteniendo_cid()
         return True
-
     ventas = obtener_ventas_por_referencia(conn, ref)
     if ventas:
         st.session_state.boletos_confirmados = ventas
         st.session_state.payment_success_id = "PAGO_CONFIRMADO"
-        limpiar_carrito_local()
+        limpiar_carrito_local(cancelar_reserva_supabase=False)
         st.session_state.boletos_confirmados = ventas
         limpiar_checkout_pendiente()
         limpiar_query_manteniendo_cid()
@@ -1551,12 +1590,7 @@ def limpiar_cache_mapa():
 
 
 def obtener_datos_mapa_cache(conn: GSheetsConnection) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Mapa rapido:
-    - Si Supabase esta activo, lee Supabase.
-    - Usa cache corto para evitar consultas en cada click.
-    - Ya no depende de Google Sheets para disponibilidad.
-    """
+    """Mapa rapido: si Supabase esta activo, lee Supabase con cache corto."""
     if supabase_activo():
         ahora = time.time()
         ts = float(st.session_state.get("_mapa_cache_ts", 0) or 0)
@@ -1697,10 +1731,12 @@ def procesar_retorno_pago(conn):
     payment_id = qp_get(qp, "payment_id", "") or qp_get(qp, "collection_id", "")
     ext_ref = qp_get(qp, "external_reference", "") or st.session_state.get("external_ref_activa", "")
     if mp_return == "failure" or mp_status in ["rejected", "cancelled", "canceled", "failure", "failed"]:
-        restaurar_carrito_local_desde_reserva(conn, ext_ref)
+        cancelar_reserva_supabase_por_referencia(ext_ref, motivo="CANCELADO_USUARIO")
+        limpiar_carrito_local(cancelar_reserva_supabase=False)
         limpiar_enlaces_pago_sin_vaciar_carrito()
         limpiar_query_manteniendo_cid()
-        st.warning("Regresaste sin completar el pago. Conservamos tus datos y boletos para que puedas intentarlo nuevamente.")
+        limpiar_cache_mapa()
+        st.warning("Regresaste sin completar el pago. La reserva fue liberada para que puedas elegir otros boletos.")
         st.rerun()
     if payment_id and mp_status == "approved":
         if confirmar_si_venta_ya_existe(conn, ext_ref):
@@ -1719,16 +1755,18 @@ def procesar_retorno_pago(conn):
             datos = finalizar_pago_confirmado_app(conn, pago, ext_ref)
             st.session_state.boletos_confirmados = datos
             st.session_state.payment_success_id = "PAGO_CONFIRMADO"
-            limpiar_carrito_local()
+            limpiar_carrito_local(cancelar_reserva_supabase=False)
             st.session_state.boletos_confirmados = datos
             limpiar_checkout_pendiente()
             limpiar_query_manteniendo_cid()
             st.rerun()
     if "stripe_cancelled" in qp:
-        restaurar_carrito_local_desde_reserva(conn, ext_ref)
+        cancelar_reserva_supabase_por_referencia(ext_ref, motivo="CANCELADO_USUARIO")
+        limpiar_carrito_local(cancelar_reserva_supabase=False)
         limpiar_enlaces_pago_sin_vaciar_carrito()
         limpiar_query_manteniendo_cid()
-        st.warning("Regresaste sin completar el pago. Conservamos tus datos y boletos para que puedas intentarlo nuevamente.")
+        limpiar_cache_mapa()
+        st.warning("Regresaste sin completar el pago. La reserva fue liberada para que puedas elegir otros boletos.")
         st.rerun()
     stripe_session_id = qp_get(qp, "stripe_session_id", "")
     if stripe_session_id:
@@ -1739,7 +1777,7 @@ def procesar_retorno_pago(conn):
             datos = finalizar_pago_confirmado_app(conn, pago, ext_ref)
             st.session_state.boletos_confirmados = datos
             st.session_state.payment_success_id = "PAGO_CONFIRMADO"
-            limpiar_carrito_local()
+            limpiar_carrito_local(cancelar_reserva_supabase=False)
             st.session_state.boletos_confirmados = datos
             limpiar_checkout_pendiente()
             limpiar_query_manteniendo_cid()
@@ -1999,10 +2037,12 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
     st.divider()
     if st.button("🧹 Cancelar reserva y vaciar carrito", use_container_width=True, key="btn_cancelar_checkout_pendiente"):
         if ref_checkout:
+            cancelar_reserva_supabase_por_referencia(ref_checkout, motivo="CANCELADO_USUARIO")
             liberar_reserva_por_rechazo_o_cancelacion(conn, ref_checkout, "CANCELADO_USUARIO")
-        limpiar_carrito_local()
+        limpiar_carrito_local(cancelar_reserva_supabase=False)
         limpiar_cache_mapa()
         limpiar_query_manteniendo_cid()
+        st.success("Reserva liberada. Ya puedes elegir otros boletos.")
         st.rerun()
 
 
