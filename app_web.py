@@ -37,7 +37,7 @@ except Exception:
 # Cambia solamente estas variables.
 # ============================================================
 TOTAL_BOLETOS = 100
-PRECIO_BOLETO = 10.00
+PRECIO_BOLETO = 15.00
 NOMBRE_EVENTO = "Gran Rifa"
 FECHA_VIGENCIA_BOLETO = "31/12/2026"
 MENSAJE_GENERAL_BOLETO = (
@@ -93,6 +93,8 @@ DEBUG_PAGOS = obtener_config("DEBUG_PAGOS", "false").lower() in ["1", "true", "s
 SUPABASE_URL = normalizar_supabase_project_url(obtener_config("SUPABASE_URL"))
 SUPABASE_SERVICE_ROLE_KEY = obtener_config("SUPABASE_SERVICE_ROLE_KEY")
 USAR_SUPABASE_TRANSACCIONAL = obtener_config("USAR_SUPABASE_TRANSACCIONAL", "true").lower() in ["1", "true", "si", "yes", "on"]
+SUPABASE_TTL_MAPA_SEGUNDOS = int(obtener_config("SUPABASE_TTL_MAPA_SEGUNDOS", "5"))
+COPIAR_SHEETS_DESDE_APP = obtener_config("COPIAR_SHEETS_DESDE_APP", "false").lower() in ["1", "true", "si", "yes", "on"]
 
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if (MP_ACCESS_TOKEN and mercadopago is not None) else None
 if STRIPE_SECRET_KEY and stripe is not None:
@@ -178,7 +180,7 @@ CSS_CUSTOM = """
 
 
 /* ============================================================
-   BOLETO SELECCIONADO EN NEGRO
+   BOLETO SELECCIONADO EN NEGRO Y PAGO RAPIDO
    ============================================================ */
 .st-key-mapa_boletos_grid [data-testid="stButton"] button[kind="primary"] {
     background: linear-gradient(135deg, #111827, #000000) !important;
@@ -353,11 +355,17 @@ def safe_data_list(obj: Any) -> list:
 
 
 # ============================================================
-# SUPABASE TRANSACCIONAL
+# SUPABASE TRANSACCIONAL Y OPTIMIZACION DE VELOCIDAD
 # ============================================================
 
 def supabase_activo() -> bool:
     return bool(USAR_SUPABASE_TRANSACCIONAL and supabase is not None)
+
+
+def limpiar_cache_mapa():
+    for key in ["_mapa_cache_ts", "_mapa_cache_ventas", "_mapa_cache_reservas"]:
+        if key in st.session_state:
+            del st.session_state[key]
 
 
 def normalizar_venta_supabase(v: Dict[str, Any]) -> Dict[str, Any]:
@@ -543,6 +551,15 @@ def finalizar_pago_confirmado_app(conn: GSheetsConnection, pago: Dict[str, Any],
         if ventas_supabase:
             return ventas_supabase
     return []
+
+
+def formatear_fecha_pdf(valor: Any) -> str:
+    """Imprime solo fecha en PDF, sin hora."""
+    texto = str(valor or "").strip()
+    if not texto:
+        return datetime.now().strftime("%Y-%m-%d")
+    texto = texto.replace("T", " ")
+    return texto.split(" ")[0]
 
 # ============================================================
 # GOOGLE SHEETS CONTROL DE CUOTA
@@ -915,28 +932,48 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
         if not ordenes:
             return False, "No hay boletos para reservar."
 
-        # Supabase es la fuente transaccional principal.
-        # Si Supabase falla, se bloquea el pago para evitar cobros sin reserva transaccional.
+        # MODO RAPIDO:
+        # Supabase es la base transaccional principal.
+        # Si Supabase esta activo, la app reserva ahi y continua sin esperar Google Sheets.
         if supabase_activo():
             ok_supabase, msg_supabase = reservar_boletos_supabase(ordenes)
             if not ok_supabase:
                 return False, msg_supabase
 
-        # Google Sheets queda como copia visual temporal.
+            limpiar_cache_mapa()
+
+            # Recomendado para velocidad: false.
+            # Si quieres copia visual en Sheets desde la app, activa COPIAR_SHEETS_DESDE_APP=true.
+            if not COPIAR_SHEETS_DESDE_APP:
+                return True, "Exito Supabase"
+
+        # Fallback o copia visual a Google Sheets.
         numeros_boletos = [parse_ticket_number(o.get("Numero_Boleto", "")) for o in ordenes]
+
         df_v_actual = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
         if obtener_error_lectura_sheets():
-            return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
+            if supabase_activo():
+                return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
+            return False, obtener_error_lectura_sheets()
+
         df_r_actual = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
         if obtener_error_lectura_sheets():
-            return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
+            if supabase_activo():
+                return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
+            return False, obtener_error_lectura_sheets()
+
         df_r_actual = liberar_reservas_previas_mismo_cliente(df_r_actual, ordenes)
         disponible, mensaje = boletos_disponibles_para_reservar(numeros_boletos, df_v_actual, df_r_actual)
+
         if not disponible and not supabase_activo():
             return False, mensaje
+
         df_nuevo = preparar_dataframe_para_update(pd.DataFrame(ordenes), columnas_reservas())
         df_actualizado = pd.concat([df_r_actual.dropna(how="all"), df_nuevo], ignore_index=True)
+
         conn.update(worksheet="Reservas", data=preparar_dataframe_para_update(df_actualizado, columnas_reservas()))
+        limpiar_cache_mapa()
+
         return True, "Exito"
     except Exception as e:
         return False, str(e)
@@ -1072,11 +1109,7 @@ def dibujar_fondo_autenticidad(canvas, doc):
 
 
 def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
-    """
-    Genera un PDF con una pagina unica por cada boleto comprado.
-    Cada numero de boleto tiene su propio espacio, encabezado, ID visual,
-    datos del comprador, precio y metodo de pago, sin mostrar referencia/proveedor en la impresion.
-    """
+    """Genera un PDF con una pagina unica por cada boleto comprado."""
     if not datos_boletos:
         return "Boleto_Sin_Datos.pdf"
 
@@ -1093,16 +1126,7 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
 
     boletos_txt = texto_boletos(boletos_unicos) or "N/A"
     nombre_archivo = f"Boleto_{boletos_txt.replace(', ', '_')}.pdf"
-
-    doc = SimpleDocTemplate(
-        nombre_archivo,
-        pagesize=letter,
-        rightMargin=46,
-        leftMargin=46,
-        topMargin=70,
-        bottomMargin=50
-    )
-
+    doc = SimpleDocTemplate(nombre_archivo, pagesize=letter, rightMargin=46, leftMargin=46, topMargin=70, bottomMargin=50)
     story = []
     styles = getSampleStyleSheet()
 
@@ -1123,14 +1147,9 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         except Exception:
             precio_txt = str(boleto.get("Precio", ""))
 
-        fecha_compra = str(boleto.get("Fecha_Compra", "") or "").split(" ")[0]
-        if not fecha_compra:
-            fecha_compra = datetime.now().strftime("%Y-%m-%d")
+        fecha_compra = formatear_fecha_pdf(boleto.get("Fecha_Compra", ""))
 
-        encabezado = Table(
-            [[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]],
-            colWidths=[500]
-        )
+        encabezado = Table([[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]], colWidths=[500])
         encabezado.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
             ("TOPPADDING", (0, 0), (-1, -1), 8),
@@ -1140,15 +1159,12 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
         story.append(encabezado)
         story.append(Spacer(1, 22))
 
-        resumen = Table(
-            [
-                [Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)],
-                [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
-                [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de validacion", estilo_bold)],
-                [Paragraph(numero_boleto, estilo_num), Paragraph(id_visual, estilo_num)],
-            ],
-            colWidths=[250, 250]
-        )
+        resumen = Table([
+            [Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)],
+            [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
+            [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de boleto", estilo_bold)],
+            [Paragraph(numero_boleto, estilo_num), Paragraph(id_visual, estilo_num)],
+        ], colWidths=[250, 250])
         resumen.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
             ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")),
@@ -1535,13 +1551,23 @@ def limpiar_cache_mapa():
 
 
 def obtener_datos_mapa_cache(conn: GSheetsConnection) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Evita releer Sheets en cada click del mapa; refresca solo por ventana corta o cuando no hay cache."""
+    """
+    Mapa rapido:
+    - Si Supabase esta activo, lee Supabase.
+    - Usa cache corto para evitar consultas en cada click.
+    - Ya no depende de Google Sheets para disponibilidad.
+    """
     if supabase_activo():
         ahora = time.time()
         ts = float(st.session_state.get("_mapa_cache_ts", 0) or 0)
         df_v_cache = st.session_state.get("_mapa_cache_ventas")
         df_r_cache = st.session_state.get("_mapa_cache_reservas")
-        if isinstance(df_v_cache, pd.DataFrame) and isinstance(df_r_cache, pd.DataFrame) and (ahora - ts) < SHEETS_TTL_MAPA_SEGUNDOS:
+        cache_valida = (
+            isinstance(df_v_cache, pd.DataFrame)
+            and isinstance(df_r_cache, pd.DataFrame)
+            and (ahora - ts) < SUPABASE_TTL_MAPA_SEGUNDOS
+        )
+        if cache_valida:
             return df_v_cache.copy(), df_r_cache.copy()
         df_v, df_r = leer_mapa_supabase()
         st.session_state["_mapa_cache_ts"] = ahora
