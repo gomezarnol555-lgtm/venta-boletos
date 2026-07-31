@@ -1,15 +1,4 @@
-import os
-import math
-import random
-import re
-import uuid
-import time
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
-import pandas as pd
-import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -32,11 +21,21 @@ except Exception:
     create_client = None
     Client = None
 
+
+def obtener_config_inicial(nombre: str, default: str = "") -> str:
+    """Lee Streamlit Secrets/ENV para configuracion temprana."""
+    try:
+        if hasattr(st, "secrets") and nombre in st.secrets:
+            return str(st.secrets[nombre]).strip()
+    except Exception:
+        pass
+    return str(os.getenv(nombre, default)).strip()
+
 # ============================================================
 # CONFIGURACION GENERAL
 # Cambia solamente estas variables.
 # ============================================================
-TOTAL_BOLETOS = 100
+TOTAL_BOLETOS = int(obtener_config_inicial("TOTAL_BOLETOS", "100"))
 PRECIO_BOLETO = 15.00
 NOMBRE_EVENTO = "Gran Rifa"
 FECHA_VIGENCIA_BOLETO = "31/12/2026"
@@ -54,7 +53,7 @@ SHEETS_TTL_LECTURA_SEGUNDOS = 6
 
 DIGITOS_BOLETO = max(1, len(str(max(int(TOTAL_BOLETOS) - 1, 0))))
 COLUMNAS_MAPA = max(1, math.ceil(math.sqrt(max(int(TOTAL_BOLETOS), 1))))
-FILAS_MAPA = COLUMNAS_MAPA
+FILAS_MAPA = max(1, math.ceil(int(TOTAL_BOLETOS) / COLUMNAS_MAPA))
 
 
 def obtener_config(nombre: str, default: str = "") -> str:
@@ -350,7 +349,7 @@ def safe_data_list(obj: Any) -> list:
 
 
 # ============================================================
-# SUPABASE TRANSACCIONAL, CANCELACION Y OPTIMIZACION DE VELOCIDAD
+# SUPABASE TRANSACCIONAL, CANCELACION, TOTAL DINAMICO Y VELOCIDAD
 # ============================================================
 
 def supabase_activo() -> bool:
@@ -361,6 +360,42 @@ def limpiar_cache_mapa():
     for key in ["_mapa_cache_ts", "_mapa_cache_ventas", "_mapa_cache_reservas"]:
         if key in st.session_state:
             del st.session_state[key]
+
+
+def sincronizar_total_boletos_supabase() -> None:
+    """Sincroniza Supabase con TOTAL_BOLETOS de la app.
+
+    TOTAL_BOLETOS = 100   -> 00 al 99
+    TOTAL_BOLETOS = 1000  -> 000 al 999
+    TOTAL_BOLETOS = 10000 -> 0000 al 9999
+    """
+    if not supabase_activo():
+        return
+
+    sincronizar = obtener_config("SINCRONIZAR_BOLETOS_SUPABASE", "true").lower() in ["1", "true", "si", "yes", "on"]
+    if not sincronizar:
+        return
+
+    reiniciar = obtener_config("REINICIAR_BOLETOS_AL_CAMBIAR_TOTAL", "false").lower() in ["1", "true", "si", "yes", "on"]
+    total_app = int(TOTAL_BOLETOS)
+    clave_sync = f"_sync_boletos_supabase_{total_app}_{str(reiniciar).lower()}"
+
+    if st.session_state.get(clave_sync):
+        return
+
+    try:
+        resultado = supabase.rpc(
+            "inicializar_boletos",
+            {
+                "p_total_boletos": total_app,
+                "p_reiniciar_movimientos": reiniciar,
+            }
+        ).execute()
+        st.session_state[clave_sync] = True
+        st.session_state["_sync_boletos_supabase_resultado"] = getattr(resultado, "data", None)
+        limpiar_cache_mapa()
+    except Exception as e:
+        st.session_state["ultimo_error_pago"] = f"Sincronizacion TOTAL_BOLETOS Supabase: {e}"
 
 
 def normalizar_venta_supabase(v: Dict[str, Any]) -> Dict[str, Any]:
@@ -423,51 +458,57 @@ def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]
         return False, f"Error Supabase al reservar: {e}"
 
 
-def cancelar_reserva_supabase_por_referencia(external_reference: str, motivo: str = "CANCELADO_USUARIO") -> Tuple[bool, str]:
-    """
-    Libera una reserva pendiente en Supabase cuando el usuario limpia carrito
-    o regresa sin completar el pago.
-    No toca boletos vendidos.
-    """
+def cancelar_boleto_reserva_supabase(external_reference: str, numero_boleto: str, motivo: str = "CANCELADO_USUARIO") -> Tuple[bool, str]:
     if not supabase_activo():
         return False, "Supabase no esta activo."
+    ref = limpiar_valor_id(external_reference)
+    boleto = parse_ticket_number(numero_boleto)
+    if not ref or not boleto:
+        return False, "Referencia o boleto invalido."
+    try:
+        ahora_iso = datetime.now().isoformat()
+        supabase.table("reservas").update({
+            "estado_reserva": motivo,
+            "fecha_actualizacion": ahora_iso,
+        }).eq("external_reference", ref).eq("numero_boleto", boleto).eq("estado_reserva", "PENDIENTE").execute()
 
+        supabase.table("boletos").update({
+            "estado": "DISPONIBLE",
+            "external_reference_actual": None,
+            "fecha_actualizacion": ahora_iso,
+        }).eq("numero_boleto", boleto).eq("estado", "RESERVADO").eq("external_reference_actual", ref).execute()
+
+        limpiar_cache_mapa()
+        return True, "Boleto liberado."
+    except Exception as e:
+        return False, f"Error liberando boleto: {e}"
+
+
+def cancelar_reserva_supabase_por_referencia(external_reference: str, motivo: str = "CANCELADO_USUARIO") -> Tuple[bool, str]:
+    if not supabase_activo():
+        return False, "Supabase no esta activo."
     ref = limpiar_valor_id(external_reference)
     if not ref:
         return False, "No hay external_reference para cancelar."
-
     try:
-        reservas = (
-            supabase.table("reservas")
-            .select("numero_boleto,estado_reserva")
-            .eq("external_reference", ref)
-            .eq("estado_reserva", "PENDIENTE")
-            .execute()
-            .data
-            or []
-        )
-
+        reservas = supabase.table("reservas").select("numero_boleto,estado_reserva").eq("external_reference", ref).eq("estado_reserva", "PENDIENTE").execute().data or []
         boletos = []
         for row in reservas:
             boleto = parse_ticket_number(row.get("numero_boleto", ""))
             if boleto and boleto not in boletos:
                 boletos.append(boleto)
-
         ahora_iso = datetime.now().isoformat()
-
         if boletos:
             supabase.table("reservas").update({
                 "estado_reserva": motivo,
                 "fecha_actualizacion": ahora_iso,
             }).eq("external_reference", ref).eq("estado_reserva", "PENDIENTE").execute()
-
             for boleto in boletos:
                 supabase.table("boletos").update({
                     "estado": "DISPONIBLE",
                     "external_reference_actual": None,
                     "fecha_actualizacion": ahora_iso,
                 }).eq("numero_boleto", boleto).eq("estado", "RESERVADO").eq("external_reference_actual", ref).execute()
-
         limpiar_cache_mapa()
         return True, "Reserva liberada correctamente."
     except Exception as e:
@@ -507,15 +548,7 @@ def obtener_ventas_supabase_por_referencia(external_reference: str) -> List[Dict
     if not ref:
         return []
     try:
-        data = (
-            supabase.table("ventas")
-            .select("id_boleto,nombre,correo,evento,numero_boleto,precio,metodo_pago,codigo_pago,fecha_compra,telefono,estado_pago,external_reference,stripe_payment_id,stripe_session_id,mercadopago_payment_id,mercadopago_preference_id,proveedor_pago")
-            .eq("external_reference", ref)
-            .order("numero_boleto")
-            .execute()
-            .data
-            or []
-        )
+        data = supabase.table("ventas").select("id_boleto,nombre,correo,evento,numero_boleto,precio,metodo_pago,codigo_pago,fecha_compra,telefono,estado_pago,external_reference,stripe_payment_id,stripe_session_id,mercadopago_payment_id,mercadopago_preference_id,proveedor_pago").eq("external_reference", ref).order("numero_boleto").execute().data or []
         return [normalizar_venta_supabase(v) for v in data]
     except Exception as e:
         st.session_state.ultimo_error_pago = f"Consulta ventas Supabase por referencia: {e}"
@@ -528,17 +561,7 @@ def consultar_ventas_supabase_por_boleto_correo(numero_boleto: str, correo: str)
     try:
         num = parse_ticket_number(numero_boleto)
         correo_limpio = str(correo or "").strip().lower()
-        data = (
-            supabase.table("ventas")
-            .select("external_reference")
-            .eq("numero_boleto", num)
-            .eq("correo", correo_limpio)
-            .order("fecha_compra", desc=True)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
+        data = supabase.table("ventas").select("external_reference").eq("numero_boleto", num).eq("correo", correo_limpio).order("fecha_compra", desc=True).limit(1).execute().data or []
         if not data:
             return []
         ref = data[0].get("external_reference", "")
@@ -664,17 +687,47 @@ def limpiar_checkout_pendiente():
 
 
 def alternar_boleto_mapa(numero_boleto: str):
-    """Actualiza el carrito visual antes de renderizar, evitando un st.rerun extra por cada click."""
+    """Agrega o quita boletos del carrito.
+
+    Si ya existe checkout pendiente, permite quitar boletos propios y libera
+    ese boleto en Supabase para que no quede bloqueado.
+    """
     asegurar_client_id_en_url()
     pre_reservas = obtener_pre_reservas_globales()
     limpiar_pre_reservas_expiradas(pre_reservas)
     mi_sesion = st.session_state.get("session_id", "")
     numero_boleto = parse_ticket_number(numero_boleto)
 
+    checkout = st.session_state.get("checkout_pendiente")
+    if isinstance(checkout, dict):
+        boletos_checkout = [parse_ticket_number(b) for b in checkout.get("boletos", []) if parse_ticket_number(b)]
+        ref_checkout = limpiar_valor_id(checkout.get("external_reference", ""))
+
+        if numero_boleto in boletos_checkout:
+            boletos_checkout = [b for b in boletos_checkout if b != numero_boleto]
+            checkout["boletos"] = boletos_checkout
+            checkout["total"] = float(PRECIO_BOLETO) * len(boletos_checkout)
+            st.session_state.checkout_pendiente = checkout
+
+            if numero_boleto in st.session_state.selected_tickets:
+                st.session_state.selected_tickets.remove(numero_boleto)
+            pre_reservas.pop(numero_boleto, None)
+
+            if ref_checkout:
+                try:
+                    cancelar_boleto_reserva_supabase(ref_checkout, numero_boleto, motivo="CANCELADO_USUARIO")
+                except Exception:
+                    pass
+
+            limpiar_enlaces_pago_sin_vaciar_carrito()
+            limpiar_cache_mapa()
+            return
+
     if numero_boleto in pre_reservas and pre_reservas[numero_boleto].get("session_id") == mi_sesion:
         pre_reservas.pop(numero_boleto, None)
         if numero_boleto in st.session_state.selected_tickets:
             st.session_state.selected_tickets.remove(numero_boleto)
+        limpiar_enlaces_pago_sin_vaciar_carrito()
         return
 
     pre_reservas[numero_boleto] = {
@@ -683,26 +736,18 @@ def alternar_boleto_mapa(numero_boleto: str):
     }
     if numero_boleto not in st.session_state.selected_tickets:
         st.session_state.selected_tickets.append(numero_boleto)
+    limpiar_enlaces_pago_sin_vaciar_carrito()
 
 
 def limpiar_carrito_local(cancelar_reserva_supabase: bool = True):
-    """
-    Limpia carrito local y, si corresponde, libera tambien la reserva pendiente en Supabase.
-
-    Si el pago ya fue confirmado, no cancela la reserva.
-    Si el usuario limpia carrito antes de pagar, libera boletos en Supabase.
-    """
     ref_para_cancelar = ""
-
     checkout = st.session_state.get("checkout_pendiente")
     if isinstance(checkout, dict):
         ref_para_cancelar = limpiar_valor_id(checkout.get("external_reference", ""))
-
     if not ref_para_cancelar:
         ref_para_cancelar = limpiar_valor_id(st.session_state.get("external_ref_activa", ""))
 
     pago_confirmado = st.session_state.get("payment_success_id") == "PAGO_CONFIRMADO"
-
     if cancelar_reserva_supabase and not pago_confirmado and ref_para_cancelar:
         try:
             cancelar_reserva_supabase_por_referencia(ref_para_cancelar, motivo="CANCELADO_USUARIO")
@@ -713,7 +758,6 @@ def limpiar_carrito_local(cancelar_reserva_supabase: bool = True):
     for boleto in list(st.session_state.get("selected_tickets", [])):
         if boleto in pre_reservas and pre_reservas[boleto].get("session_id") == st.session_state.get("session_id"):
             del pre_reservas[boleto]
-
     st.session_state.selected_tickets = []
     limpiar_enlaces_pago_sin_vaciar_carrito()
     limpiar_checkout_pendiente()
@@ -1004,7 +1048,6 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
     try:
         if not ordenes:
             return False, "No hay boletos para reservar."
-
         if supabase_activo():
             ok_supabase, msg_supabase = reservar_boletos_supabase(ordenes)
             if not ok_supabase:
@@ -1012,7 +1055,6 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
             limpiar_cache_mapa()
             if not COPIAR_SHEETS_DESDE_APP:
                 return True, "Exito Supabase"
-
         numeros_boletos = [parse_ticket_number(o.get("Numero_Boleto", "")) for o in ordenes]
         df_v_actual = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
         if obtener_error_lectura_sheets():
@@ -1191,7 +1233,6 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
     estilo_num = ParagraphStyle("Num", parent=styles["Heading1"], fontSize=30, leading=36, textColor=colors.HexColor("#991B1B"), alignment=1)
     estilo_evento = ParagraphStyle("Evento", parent=styles["Heading2"], fontSize=13, leading=16, textColor=colors.HexColor("#0A2540"), alignment=1)
     estilo_mensaje = ParagraphStyle("Mensaje", parent=styles["Normal"], fontSize=8.7, leading=11, textColor=colors.HexColor("#475569"), alignment=1)
-
     for idx, boleto in enumerate(boletos_unicos):
         numero_boleto = parse_ticket_number(boleto.get("Numero_Boleto", ""))
         id_visual = f"Bol-{numero_boleto}"
@@ -1201,58 +1242,17 @@ def generar_pdf_boleto(datos_boletos: List[Dict[str, Any]]) -> str:
             precio_txt = str(boleto.get("Precio", ""))
         fecha_compra = formatear_fecha_pdf(boleto.get("Fecha_Compra", ""))
         encabezado = Table([[Paragraph("BOLETO OFICIAL", estilo_titulo)], [Paragraph(str(NOMBRE_EVENTO), estilo_sub)]], colWidths=[500])
-        encabezado.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ]))
-        story.append(encabezado)
-        story.append(Spacer(1, 22))
-        resumen = Table([
-            [Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)],
-            [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)],
-            [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de boleto", estilo_bold)],
-            [Paragraph(numero_boleto, estilo_num), Paragraph(id_visual, estilo_num)],
-        ], colWidths=[250, 250])
-        resumen.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")),
-            ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")),
-            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#0A2540")),
-            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ]))
-        story.append(resumen)
-        story.append(Spacer(1, 18))
+        encabezado.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0A2540")), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+        story.append(encabezado); story.append(Spacer(1, 22))
+        resumen = Table([[Paragraph("Nombre del evento", estilo_bold), Paragraph("Fecha de vigencia", estilo_bold)], [Paragraph(str(NOMBRE_EVENTO), estilo_evento), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_evento)], [Paragraph("No. de Boleto", estilo_bold), Paragraph("ID de boleto", estilo_bold)], [Paragraph(numero_boleto, estilo_num), Paragraph(id_visual, estilo_num)]], colWidths=[250, 250])
+        resumen.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E0F2FE")), ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#E0F2FE")), ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
+        story.append(resumen); story.append(Spacer(1, 18))
         mensaje = Table([[Paragraph(MENSAJE_GENERAL_BOLETO, estilo_mensaje)]], colWidths=[500])
-        mensaje.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
-            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#CBD5E1")),
-            ("TOPPADDING", (0, 0), (-1, -1), 9),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
-        ]))
-        story.append(mensaje)
-        story.append(Spacer(1, 18))
-        filas = [
-            [Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(id_visual, estilo_celda)],
-            [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)],
-            [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)],
-            [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)],
-            [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)],
-            [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)],
-            [Paragraph("<b>Vigencia:</b>", estilo_bold), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_celda)],
-        ]
+        mensaje.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")), ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#CBD5E1")), ("TOPPADDING", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 9)]))
+        story.append(mensaje); story.append(Spacer(1, 18))
+        filas = [[Paragraph("<b>ID de Boleto:</b>", estilo_bold), Paragraph(id_visual, estilo_celda)], [Paragraph("<b>Nombre:</b>", estilo_bold), Paragraph(str(boleto.get("Nombre", "")), estilo_celda)], [Paragraph("<b>No. de Boleto:</b>", estilo_bold), Paragraph(numero_boleto, estilo_celda)], [Paragraph("<b>Precio Pagado:</b>", estilo_bold), Paragraph(precio_txt, estilo_celda)], [Paragraph("<b>Metodo de Pago:</b>", estilo_bold), Paragraph(str(boleto.get("Metodo_Pago", "Pago electronico")).upper(), estilo_celda)], [Paragraph("<b>Fecha:</b>", estilo_bold), Paragraph(fecha_compra, estilo_celda)], [Paragraph("<b>Vigencia:</b>", estilo_bold), Paragraph(str(FECHA_VIGENCIA_BOLETO), estilo_celda)]]
         detalle = Table(filas, colWidths=[160, 340])
-        detalle.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#0A2540")),
-            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")),
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ]))
+        detalle.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#0A2540")), ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E2E8F0")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
         story.append(detalle)
         if idx < len(boletos_unicos) - 1:
             story.append(PageBreak())
@@ -1281,15 +1281,7 @@ def procesar_descarga_pdf(datos_boletos: List[dict]):
     boletos_key = "_".join([parse_ticket_number(b.get("Numero_Boleto", "")) for b in boletos_unicos])
     ref_key = limpiar_valor_id(boletos_unicos[0].get("Referencia_Pago", "") if boletos_unicos else "")
     timestamp_key = datetime.now().strftime("%Y%m%d%H%M%S%f")
-    st.download_button(
-        label=label,
-        data=pdf_bytes,
-        file_name=archivo_pdf,
-        mime="application/pdf",
-        type="primary",
-        use_container_width=True,
-        key=f"download_pdf_{ref_key}_{boletos_key}_{timestamp_key}"
-    )
+    st.download_button(label=label, data=pdf_bytes, file_name=archivo_pdf, mime="application/pdf", type="primary", use_container_width=True, key=f"download_pdf_{ref_key}_{boletos_key}_{timestamp_key}")
 
 
 # ============================================================
@@ -1562,7 +1554,6 @@ def confirmar_si_venta_ya_existe(conn: GSheetsConnection, external_reference: st
 
 def obtener_estado_boletos_bd(df_ventas, df_reservas):
     estados = {}
-
     checkout_actual = st.session_state.get("checkout_pendiente")
     ref_checkout_actual = ""
     if isinstance(checkout_actual, dict):
@@ -1581,10 +1572,7 @@ def obtener_estado_boletos_bd(df_ventas, df_reservas):
                     num = parse_ticket_number(row["Numero_Boleto"])
                     ref_reserva = limpiar_valor_id(row.get("External_Reference", ""))
                     if num:
-                        if ref_checkout_actual and ref_reserva == ref_checkout_actual:
-                            estados[num] = "pre_reservado_mio"
-                        else:
-                            estados[num] = "reservado_db"
+                        estados[num] = "pre_reservado_mio" if (ref_checkout_actual and ref_reserva == ref_checkout_actual) else "reservado_db"
     if not df_ventas.empty and "Numero_Boleto" in df_ventas.columns:
         for _, row in df_ventas.iterrows():
             if str(row.get("Estado_Pago", "")).strip().upper() in ["APROBADO", "VENDIDO"]:
@@ -1858,31 +1846,22 @@ def sincronizar_checkout_con_seleccion_local():
 
 
 def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[bool, str]:
-    """Antes de pagar, sincroniza todos los boletos del checkout.
-
-    Modo rapido:
-    - Si Supabase esta activo, actualiza/crea la reserva completa en Supabase.
-    - Si COPIAR_SHEETS_DESDE_APP=false, no espera a Google Sheets.
-    - Si COPIAR_SHEETS_DESDE_APP=true, deja Sheets como copia visual.
-    """
+    """Sincroniza todos los boletos del checkout antes de crear link de pago."""
     checkout = st.session_state.get("checkout_pendiente")
     if not isinstance(checkout, dict):
         return False, "No existe checkout pendiente."
-
     ref = limpiar_valor_id(checkout.get("external_reference", ""))
     boletos_checkout = [parse_ticket_number(b) for b in checkout.get("boletos", []) if parse_ticket_number(b)]
     if not ref or not boletos_checkout:
         return False, "La reserva no contiene referencia o boletos."
-
     nombre_completo = f"{checkout.get('nombre', '').strip()} {checkout.get('apellidos', '').strip()}".strip()
     correo = str(checkout.get("correo", "")).strip().lower()
     telefono = str(checkout.get("telefono", "")).strip()
 
-    # 1. Fuente principal: Supabase.
     if supabase_activo():
-        ordenes_supabase = []
         ahora_txt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         expira_txt = (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S")
+        ordenes_supabase = []
         for boleto in boletos_checkout:
             ordenes_supabase.append({
                 "External_Reference": ref,
@@ -1900,40 +1879,32 @@ def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[boo
                 "Expira_En": expira_txt,
                 "Fecha_Actualizacion": ahora_txt,
             })
-
         ok_supabase, msg_supabase = reservar_boletos_supabase(ordenes_supabase)
         if not ok_supabase:
             return False, msg_supabase
-
         limpiar_cache_mapa()
         if not COPIAR_SHEETS_DESDE_APP:
             return True, "Reserva sincronizada en Supabase."
 
-    # 2. Copia visual/fallback Google Sheets.
     df_r = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
     if obtener_error_lectura_sheets():
         if supabase_activo():
             return True, "Reserva sincronizada en Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
         return False, obtener_error_lectura_sheets()
-
     df_v = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
     if obtener_error_lectura_sheets():
         if supabase_activo():
             return True, "Reserva sincronizada en Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
         return False, obtener_error_lectura_sheets()
-
     ya_reservados_ref = []
     if not df_r.empty:
         ya_reservados_ref = df_r[df_r["External_Reference"].astype(str) == ref]["Numero_Boleto"].astype(str).apply(parse_ticket_number).tolist()
-
     boletos_nuevos = [b for b in boletos_checkout if b not in ya_reservados_ref]
     if not boletos_nuevos:
         return True, "Reserva sincronizada."
-
     disponible, mensaje = boletos_disponibles_para_reservar(boletos_nuevos, df_v, df_r, external_reference_actual=ref)
     if not disponible and not supabase_activo():
         return False, mensaje
-
     ahora_txt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     expira_txt = (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S")
     nuevas = []
@@ -1954,7 +1925,6 @@ def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[boo
             "Expira_En": expira_txt,
             "Fecha_Actualizacion": ahora_txt,
         })
-
     df_final = pd.concat([df_r.dropna(how="all"), preparar_dataframe_para_update(pd.DataFrame(nuevas), columnas_reservas())], ignore_index=True)
     conn.update(worksheet="Reservas", data=preparar_dataframe_para_update(df_final, columnas_reservas()))
     return True, "Reserva actualizada con boletos adicionales."
