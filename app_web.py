@@ -290,18 +290,12 @@ def obtener_client_id_url() -> str:
 
 
 def asegurar_client_id_en_url() -> str:
-    """
-    Asegura un identificador de carrito (cid) en la URL.
-
-    Si la URL incluye ?new=1, se genera un carrito completamente nuevo.
-    Esto evita conflictos cuando un usuario copia y comparte un link que podria traer un cid anterior.
-    """
+    """Genera o conserva el identificador del carrito. Si llega ?new=1, crea un carrito nuevo."""
     try:
         nuevo = st.query_params.get("new", "")
         if isinstance(nuevo, list):
             nuevo = nuevo[0] if nuevo else ""
         nuevo = str(nuevo or "").strip().lower()
-
         if nuevo in ["1", "true", "si", "yes", "on"]:
             cid_nuevo = str(uuid.uuid4())
             st.session_state.session_id = cid_nuevo
@@ -338,7 +332,7 @@ def parametros_retorno_pago(extra: Dict[str, str]) -> Dict[str, str]:
 
 
 def obtener_link_publico_nuevo_carrito() -> str:
-    """Devuelve un enlace seguro para compartir que fuerza carrito nuevo con ?new=1."""
+    """Devuelve un enlace para iniciar una compra nueva."""
     base = APP_PUBLIC_URL or ""
     if not base:
         return ""
@@ -462,9 +456,9 @@ def normalizar_venta_supabase(v: Dict[str, Any]) -> Dict[str, Any]:
 
 def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]:
     if not supabase_activo():
-        return False, "Supabase no esta configurado en Streamlit. Revisa SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y requirements.txt."
+        return False, "No fue posible preparar la compra. Intenta nuevamente."
     if not ordenes:
-        return False, "No hay boletos para reservar en Supabase."
+        return False, "No hay boletos para reservar."
     ref = limpiar_valor_id(ordenes[0].get("External_Reference", ""))
     nombre = limpiar_valor_id(ordenes[0].get("Nombre", ""))
     correo = limpiar_valor_id(ordenes[0].get("Correo", "")).lower()
@@ -479,18 +473,18 @@ def reservar_boletos_supabase(ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]
     except Exception:
         precio = float(PRECIO_BOLETO)
     if not ref or not boletos:
-        return False, "Reserva Supabase invalida: falta referencia o boletos."
+        return False, "No fue posible preparar la compra. Intenta nuevamente."
     params = {"p_external_reference": ref, "p_boletos": boletos, "p_nombre": nombre, "p_correo": correo, "p_telefono": telefono, "p_precio": precio, "p_minutos_reserva": int(TIEMPO_RESERVA_MINUTOS)}
     try:
         supabase.rpc("reservar_boletos", params).execute()
-        return True, "Exito Supabase"
+        return True, "Listo"
     except Exception as e:
-        return False, f"Error Supabase al reservar: {e}"
+        return False, "No fue posible reservar. Intenta nuevamente."
 
 
 def cancelar_boleto_reserva_supabase(external_reference: str, numero_boleto: str, motivo: str = "CANCELADO_USUARIO") -> Tuple[bool, str]:
     if not supabase_activo():
-        return False, "Supabase no esta activo."
+        return False, "No fue posible continuar. Intenta nuevamente."
     ref = limpiar_valor_id(external_reference)
     boleto = parse_ticket_number(numero_boleto)
     if not ref or not boleto:
@@ -507,7 +501,7 @@ def cancelar_boleto_reserva_supabase(external_reference: str, numero_boleto: str
 
 def cancelar_reserva_supabase_por_referencia(external_reference: str, motivo: str = "CANCELADO_USUARIO") -> Tuple[bool, str]:
     if not supabase_activo():
-        return False, "Supabase no esta activo."
+        return False, "No fue posible continuar. Intenta nuevamente."
     ref = limpiar_valor_id(external_reference)
     if not ref:
         return False, "No hay external_reference para cancelar."
@@ -526,16 +520,11 @@ def cancelar_reserva_supabase_por_referencia(external_reference: str, motivo: st
         limpiar_cache_mapa()
         return True, "Reserva liberada correctamente."
     except Exception as e:
-        return False, f"Error liberando reserva en Supabase: {e}"
+        return False, "No fue posible liberar la seleccion. Intenta nuevamente."
 
 
 def leer_mapa_supabase() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Lectura optimizada del mapa desde Supabase.
-
-    Si SUPABASE_SOLO_ESTADOS_ACTIVOS_MAPA=true, consulta solo boletos
-    RESERVADO/VENDIDO y asume como DISPONIBLES los que no regresan.
-    """
+    """Lee disponibilidad desde Supabase de forma optimizada."""
     if not supabase_activo():
         return pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
     try:
@@ -561,8 +550,8 @@ def leer_mapa_supabase() -> Tuple[pd.DataFrame, pd.DataFrame]:
                 reservas_rows.append({"External_Reference": ref, "Numero_Boleto": num, "Estado_Reserva": "PENDIENTE", "Expira_En": expira_virtual})
 
         return asegurar_columnas(pd.DataFrame(ventas_rows), columnas_ventas()), asegurar_columnas(pd.DataFrame(reservas_rows), columnas_reservas())
-    except Exception as e:
-        st.session_state["_sheet_read_error"] = f"Error leyendo mapa desde Supabase: {e}. Revisa que SUPABASE_URL sea solo https://xxxx.supabase.co, sin /rest/v1 ni rutas del dashboard."
+    except Exception:
+        st.session_state["_sheet_read_error"] = "No fue posible actualizar la disponibilidad. Recarga la pagina o intenta nuevamente."
         return pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
 
 def obtener_ventas_supabase_por_referencia(external_reference: str) -> List[Dict[str, Any]]:
@@ -575,7 +564,7 @@ def obtener_ventas_supabase_por_referencia(external_reference: str) -> List[Dict
         data = supabase.table("ventas").select("id_boleto,nombre,correo,evento,numero_boleto,precio,metodo_pago,codigo_pago,fecha_compra,telefono,estado_pago,external_reference,stripe_payment_id,stripe_session_id,mercadopago_payment_id,mercadopago_preference_id,proveedor_pago").eq("external_reference", ref).order("numero_boleto").execute().data or []
         return [normalizar_venta_supabase(v) for v in data]
     except Exception as e:
-        st.session_state.ultimo_error_pago = f"Consulta ventas Supabase por referencia: {e}"
+        st.session_state.ultimo_error_pago = "No fue posible consultar la compra."
         return []
 
 
@@ -595,7 +584,7 @@ def consultar_ventas_supabase_por_boleto_correo(numero_boleto: str, correo: str)
 
 def confirmar_pago_supabase_desde_app(payment_info: Dict[str, Any]) -> Tuple[bool, str]:
     if not supabase_activo():
-        return False, "Supabase no esta activo en la app."
+        return False, "No fue posible continuar. Intenta nuevamente."
     try:
         proveedor = obtener_proveedor_pago(payment_info)
         ext_ref = obtener_external_reference_pago(payment_info)
@@ -611,9 +600,9 @@ def confirmar_pago_supabase_desde_app(payment_info: Dict[str, Any]) -> Tuple[boo
             return False, "No se recibio payment_id."
         params = {"p_provider": proveedor, "p_external_reference": ext_ref, "p_payment_id": pago_id, "p_session_id": session_id, "p_preference_id": preference_id, "p_monto_pagado": monto_pagado, "p_moneda": moneda, "p_metodo_pago": metodo_pago, "p_evento": NOMBRE_EVENTO, "p_payload": {}}
         supabase.rpc("confirmar_pago_y_vender", params).execute()
-        return True, "Pago confirmado en Supabase."
+        return True, "Pago confirmado."
     except Exception as e:
-        st.session_state.ultimo_error_pago = f"Confirmacion Supabase desde app: {e}"
+        st.session_state.ultimo_error_pago = "No fue posible confirmar el pago en este momento."
         return False, str(e)
 
 
@@ -1124,17 +1113,17 @@ def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any
                 return False, msg_supabase
             limpiar_cache_mapa()
             if not COPIAR_SHEETS_DESDE_APP:
-                return True, "Exito Supabase"
+                return True, "Listo"
         numeros_boletos = [parse_ticket_number(o.get("Numero_Boleto", "")) for o in ordenes]
         df_v_actual = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
         if obtener_error_lectura_sheets():
             if supabase_activo():
-                return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
+                return True, "Listo"
             return False, obtener_error_lectura_sheets()
         df_r_actual = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
         if obtener_error_lectura_sheets():
             if supabase_activo():
-                return True, "Exito Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
+                return True, "Listo"
             return False, obtener_error_lectura_sheets()
         df_r_actual = liberar_reservas_previas_mismo_cliente(df_r_actual, ordenes)
         disponible, mensaje = boletos_disponibles_para_reservar(numeros_boletos, df_v_actual, df_r_actual)
@@ -1839,7 +1828,7 @@ def procesar_retorno_pago(conn):
     if mp_return == "failure" or mp_status in ["rejected", "cancelled", "canceled", "failure", "failed"]:
         liberar_reserva_y_mantener_seleccion(ext_ref)
         limpiar_query_manteniendo_cid()
-        st.warning("Regresaste sin completar el pago. Conservamos tus datos y boletos seleccionados, pero la reserva fue liberada para que puedas cambiar boletos o intentar pagar nuevamente.")
+        st.warning("Regresaste sin completar el pago. Tus datos se conservaron y puedes cambiar tus boletos o intentar pagar nuevamente.")
         st.rerun()
     if payment_id and mp_status == "approved":
         if confirmar_si_venta_ya_existe(conn, ext_ref):
@@ -1866,7 +1855,7 @@ def procesar_retorno_pago(conn):
     if "stripe_cancelled" in qp:
         liberar_reserva_y_mantener_seleccion(ext_ref)
         limpiar_query_manteniendo_cid()
-        st.warning("Regresaste sin completar el pago. Conservamos tus datos y boletos seleccionados, pero la reserva fue liberada para que puedas cambiar boletos o intentar pagar nuevamente.")
+        st.warning("Regresaste sin completar el pago. Tus datos se conservaron y puedes cambiar tus boletos o intentar pagar nuevamente.")
         st.rerun()
     stripe_session_id = qp_get(qp, "stripe_session_id", "")
     if stripe_session_id:
@@ -1918,8 +1907,8 @@ def inicializar_estado():
 
 def mostrar_diagnostico_pagos():
     if DEBUG_PAGOS:
-        with st.expander("Diagnostico tecnico"):
-            st.json({"MP_ACCESS_TOKEN_configurado": bool(MP_ACCESS_TOKEN), "STRIPE_SECRET_KEY_configurado": bool(STRIPE_SECRET_KEY), "ultimo_error_pago": st.session_state.get("ultimo_error_pago", "")})
+        with st.expander("Ayuda"):
+            st.json({"MP_ACCESS_TOKEN_configurado": bool(MP_ACCESS_TOKEN), "STRIPE_SECRET_KEY_configurado": bool(STRIPE_SECRET_KEY), "mensaje": st.session_state.get("ultimo_error_pago", "")})
 
 
 
@@ -1969,16 +1958,16 @@ def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[boo
             return False, msg_supabase
         limpiar_cache_mapa()
         if not COPIAR_SHEETS_DESDE_APP:
-            return True, "Reserva sincronizada en Supabase."
+            return True, "Reserva lista."
     df_r = preparar_dataframe_para_update(leer_reservas(conn, ttl_segundos=3), columnas_reservas())
     if obtener_error_lectura_sheets():
         if supabase_activo():
-            return True, "Reserva sincronizada en Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
+            return True, "Reserva lista."
         return False, obtener_error_lectura_sheets()
     df_v = preparar_dataframe_para_update(leer_ventas(conn, ttl_segundos=3), columnas_ventas())
     if obtener_error_lectura_sheets():
         if supabase_activo():
-            return True, "Reserva sincronizada en Supabase. Advertencia Sheets: " + obtener_error_lectura_sheets()
+            return True, "Reserva lista."
         return False, obtener_error_lectura_sheets()
     ya_reservados_ref = []
     if not df_r.empty:
@@ -2023,7 +2012,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
 
     st.success(f"✅ Reserva lista para pago: {', '.join(boletos_checkout)}")
     st.write(f"### 💰 Total a pagar: ${total_checkout:.2f} MXN")
-    st.caption("Puedes agregar o quitar boletos desde el mapa. Si abandonas la pantalla de pago, la app conserva tu seleccion y datos, pero libera la reserva en Supabase para que los boletos no queden bloqueados.")
+    st.caption("Puedes agregar o quitar boletos desde el mapa antes de pagar. Si sales sin pagar, tus datos se conservan para intentarlo nuevamente.")
 
     st.markdown(f"""
     <style>
@@ -2066,7 +2055,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
         if not url_pago:
             ok_sync, msg_sync = sincronizar_reserva_checkout_en_sheets(conn)
             if not ok_sync:
-                st.error(f"No fue posible actualizar la reserva antes del pago: {msg_sync}")
+                st.error("No fue posible preparar tu compra. Intenta nuevamente.")
                 return
 
             checkout = st.session_state.get("checkout_pendiente", {})
@@ -2149,7 +2138,7 @@ def main():
     st.title(f"🎟️ Plataforma de Boletos - {NOMBRE_EVENTO}")
     link_nuevo_carrito = obtener_link_publico_nuevo_carrito()
     if link_nuevo_carrito:
-        st.caption("Enlace seguro para compartir sin reutilizar carrito: agrega ?new=1 al link publico de la app.")
+        st.caption("Para compartir la app, usa el enlace publico con ?new=1 para iniciar una compra nueva.")
     tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🎫 Buscar mis Boletos / Verificar Pago"])
     with tab2:
         st.markdown("### 🎫 Consulta tus boletos")
