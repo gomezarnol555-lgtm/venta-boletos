@@ -105,10 +105,10 @@ DEBUG_PAGOS = obtener_config("DEBUG_PAGOS", "false").lower() in ["1", "true", "s
 SUPABASE_URL = normalizar_supabase_project_url(obtener_config("SUPABASE_URL"))
 SUPABASE_SERVICE_ROLE_KEY = obtener_config("SUPABASE_SERVICE_ROLE_KEY")
 USAR_SUPABASE_TRANSACCIONAL = obtener_config("USAR_SUPABASE_TRANSACCIONAL", "true").lower() in ["1", "true", "si", "yes", "on"]
-SUPABASE_TTL_MAPA_SEGUNDOS = int(obtener_config("SUPABASE_TTL_MAPA_SEGUNDOS", "10"))
+SUPABASE_TTL_MAPA_SEGUNDOS = int(obtener_config("SUPABASE_TTL_MAPA_SEGUNDOS", "5"))
 COPIAR_SHEETS_DESDE_APP = obtener_config("COPIAR_SHEETS_DESDE_APP", "false").lower() in ["1", "true", "si", "yes", "on"]
+APP_PUBLIC_URL = obtener_config("APP_PUBLIC_URL", "")
 SUPABASE_SOLO_ESTADOS_ACTIVOS_MAPA = obtener_config("SUPABASE_SOLO_ESTADOS_ACTIVOS_MAPA", "true").lower() in ["1", "true", "si", "yes", "on"]
-CSS_MAPA_SOLO_ESTADOS_ACTIVOS = obtener_config("CSS_MAPA_SOLO_ESTADOS_ACTIVOS", "true").lower() in ["1", "true", "si", "yes", "on"]
 
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if (MP_ACCESS_TOKEN and mercadopago is not None) else None
 if STRIPE_SECRET_KEY and stripe is not None:
@@ -290,10 +290,35 @@ def obtener_client_id_url() -> str:
 
 
 def asegurar_client_id_en_url() -> str:
+    """
+    Asegura un identificador de carrito (cid) en la URL.
+
+    Si la URL incluye ?new=1, se genera un carrito completamente nuevo.
+    Esto evita conflictos cuando un usuario copia y comparte un link que podria traer un cid anterior.
+    """
+    try:
+        nuevo = st.query_params.get("new", "")
+        if isinstance(nuevo, list):
+            nuevo = nuevo[0] if nuevo else ""
+        nuevo = str(nuevo or "").strip().lower()
+
+        if nuevo in ["1", "true", "si", "yes", "on"]:
+            cid_nuevo = str(uuid.uuid4())
+            st.session_state.session_id = cid_nuevo
+            try:
+                st.query_params.clear()
+                st.query_params[CLIENT_ID_PARAM] = cid_nuevo
+            except Exception:
+                pass
+            return cid_nuevo
+    except Exception:
+        pass
+
     cid_url = obtener_client_id_url()
     if cid_url:
         st.session_state.session_id = cid_url
         return cid_url
+
     cid_actual = limpiar_valor_id(st.session_state.get("session_id", "")) or str(uuid.uuid4())
     st.session_state.session_id = cid_actual
     try:
@@ -301,7 +326,6 @@ def asegurar_client_id_en_url() -> str:
     except Exception:
         pass
     return cid_actual
-
 
 def parametros_retorno_pago(extra: Dict[str, str]) -> Dict[str, str]:
     params = dict(extra or {})
@@ -311,6 +335,14 @@ def parametros_retorno_pago(extra: Dict[str, str]) -> Dict[str, str]:
     params["return_to"] = "carrito"
     return params
 
+
+
+def obtener_link_publico_nuevo_carrito() -> str:
+    """Devuelve un enlace seguro para compartir que fuerza carrito nuevo con ?new=1."""
+    base = APP_PUBLIC_URL or ""
+    if not base:
+        return ""
+    return agregar_parametros_url(base, {"new": "1"})
 
 def limpiar_query_manteniendo_cid():
     cid = limpiar_valor_id(st.session_state.get("session_id", "")) or obtener_client_id_url()
@@ -501,25 +533,19 @@ def leer_mapa_supabase() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Lectura optimizada del mapa desde Supabase.
 
-    En lugar de traer todos los boletos cuando casi todos estan DISPONIBLE,
-    consulta solo los boletos con estado RESERVADO o VENDIDO. La app asume
-    como disponibles los boletos que no regresan en esta consulta.
-
-    Esto mejora mucho la fluidez cuando aumentas a 1000 boletos o mas.
+    Si SUPABASE_SOLO_ESTADOS_ACTIVOS_MAPA=true, consulta solo boletos
+    RESERVADO/VENDIDO y asume como DISPONIBLES los que no regresan.
     """
     if not supabase_activo():
         return pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
-
     try:
         query = supabase.table("boletos").select(
             "numero_boleto,estado,external_reference_actual,fecha_actualizacion"
         )
-
         if SUPABASE_SOLO_ESTADOS_ACTIVOS_MAPA:
             query = query.in_("estado", ["RESERVADO", "VENDIDO"])
 
         boletos_data = query.execute().data or []
-
         ventas_rows, reservas_rows = [], []
         expira_virtual = (datetime.now() + timedelta(minutes=TIEMPO_RESERVA_MINUTOS)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -527,35 +553,16 @@ def leer_mapa_supabase() -> Tuple[pd.DataFrame, pd.DataFrame]:
             num = parse_ticket_number(row.get("numero_boleto", ""))
             estado = str(row.get("estado", "") or "").upper()
             ref = limpiar_valor_id(row.get("external_reference_actual", ""))
-
             if not num:
                 continue
-
             if estado == "VENDIDO":
-                ventas_rows.append({
-                    "Numero_Boleto": num,
-                    "Estado_Pago": "VENDIDO",
-                    "Referencia_Pago": ref
-                })
+                ventas_rows.append({"Numero_Boleto": num, "Estado_Pago": "VENDIDO", "Referencia_Pago": ref})
             elif estado == "RESERVADO":
-                reservas_rows.append({
-                    "External_Reference": ref,
-                    "Numero_Boleto": num,
-                    "Estado_Reserva": "PENDIENTE",
-                    "Expira_En": expira_virtual
-                })
+                reservas_rows.append({"External_Reference": ref, "Numero_Boleto": num, "Estado_Reserva": "PENDIENTE", "Expira_En": expira_virtual})
 
-        return (
-            asegurar_columnas(pd.DataFrame(ventas_rows), columnas_ventas()),
-            asegurar_columnas(pd.DataFrame(reservas_rows), columnas_reservas())
-        )
-
+        return asegurar_columnas(pd.DataFrame(ventas_rows), columnas_ventas()), asegurar_columnas(pd.DataFrame(reservas_rows), columnas_reservas())
     except Exception as e:
-        st.session_state["_sheet_read_error"] = (
-            f"Error leyendo mapa desde Supabase: {e}. "
-            "Revisa que SUPABASE_URL sea solo https://xxxx.supabase.co, "
-            "sin /rest/v1 ni rutas del dashboard."
-        )
+        st.session_state["_sheet_read_error"] = f"Error leyendo mapa desde Supabase: {e}. Revisa que SUPABASE_URL sea solo https://xxxx.supabase.co, sin /rest/v1 ni rutas del dashboard."
         return pd.DataFrame(columns=columnas_ventas()), pd.DataFrame(columns=columnas_reservas())
 
 def obtener_ventas_supabase_por_referencia(external_reference: str) -> List[Dict[str, Any]]:
@@ -1764,11 +1771,13 @@ def renderizar_mapa_interactivo():
         border-color:#10B981!important;
         color:#064E3B!important;
     }
+    @keyframes lockPulse {
+        0% { transform: scale(1); box-shadow: 0 3px 9px rgba(100,116,139,.16); }
+        50% { transform: scale(1.035); box-shadow: 0 8px 18px rgba(100,116,139,.28); }
+        100% { transform: scale(1); box-shadow: 0 3px 9px rgba(100,116,139,.16); }
+    }
     </style>
     """]
-
-    # CSS optimizado: los disponibles usan el estilo base verde.
-    # Solo se generan reglas para vendidos, reservados, otro carrito y seleccionados.
     for num, estado in estados.items():
         if estado == "vendido_db":
             fondo, borde, color = "linear-gradient(145deg,#FECACA,#FEF2F2)", "#EF4444", "#7F1D1D"
@@ -1776,19 +1785,20 @@ def renderizar_mapa_interactivo():
             fondo, borde, color = "linear-gradient(145deg,#FED7AA,#FFF7ED)", "#F59E0B", "#7C2D12"
         elif estado == "pre_reservado_otros":
             fondo, borde, color = "linear-gradient(145deg,#E2E8F0,#F8FAFC)", "#64748B", "#334155"
+            estilos.append(
+                f"<style>.st-key-btn_{num} button{{"
+                f"background:{fondo}!important;"
+                f"border-color:{borde}!important;"
+                f"color:{color}!important;"
+                f"animation:lockPulse 1.8s ease-in-out infinite!important"
+                f"}}</style>"
+            )
+            continue
         elif estado == "pre_reservado_mio" or num in st.session_state.selected_tickets:
             fondo, borde, color = "linear-gradient(145deg,#111827,#000000)", "#000000", "#FFFFFF"
         else:
             continue
-
-        estilos.append(
-            f"<style>.st-key-btn_{num} button{{"
-            f"background:{fondo}!important;"
-            f"border-color:{borde}!important;"
-            f"color:{color}!important"
-            f"}}</style>"
-        )
-
+        estilos.append(f"<style>.st-key-btn_{num} button{{background:{fondo}!important;border-color:{borde}!important;color:{color}!important}}</style>")
     st.markdown("\n".join(estilos), unsafe_allow_html=True)
     with st.container(key="mapa_boletos_grid"):
         for fila in range(FILAS_MAPA):
@@ -1800,7 +1810,14 @@ def renderizar_mapa_interactivo():
                 num = formatear_numero_boleto(idx)
                 estado = estados[num]
                 with cols[col_idx]:
-                    if estado in ["vendido_db", "reservado_db", "pre_reservado_otros"]:
+                    if estado == "pre_reservado_otros":
+                        st.button(
+                            f"🔒\n{num}",
+                            disabled=True,
+                            key=f"btn_{num}",
+                            help="En carrito de otro usuario"
+                        )
+                    elif estado in ["vendido_db", "reservado_db"]:
                         st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help=estado)
                     else:
                         seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
@@ -2130,6 +2147,9 @@ def main():
     conn = st.connection("gsheets", type=GSheetsConnection)
     procesar_retorno_pago(conn)
     st.title(f"🎟️ Plataforma de Boletos - {NOMBRE_EVENTO}")
+    link_nuevo_carrito = obtener_link_publico_nuevo_carrito()
+    if link_nuevo_carrito:
+        st.caption("Enlace seguro para compartir sin reutilizar carrito: agrega ?new=1 al link publico de la app.")
     tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🎫 Buscar mis Boletos / Verificar Pago"])
     with tab2:
         st.markdown("### 🎫 Consulta tus boletos")
