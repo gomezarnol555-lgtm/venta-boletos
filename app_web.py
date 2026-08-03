@@ -1777,6 +1777,10 @@ def renderizar_mapa_interactivo():
                 f"background:{fondo}!important;"
                 f"border-color:{borde}!important;"
                 f"color:{color}!important;"
+                f"opacity:.72!important;"
+                f"filter:grayscale(.35) saturate(.65)!important;"
+                f"opacity:.72!important;"
+                f"filter:grayscale(.35) saturate(.65)!important;"
                 f"animation:lockPulse 1.8s ease-in-out infinite!important"
                 f"}}</style>"
             )
@@ -1788,12 +1792,24 @@ def renderizar_mapa_interactivo():
                 f"background:{fondo}!important;"
                 f"border-color:{borde}!important;"
                 f"color:{color}!important;"
+                f"opacity:.72!important;"
+                f"filter:grayscale(.35) saturate(.65)!important;"
                 f"animation:lockPulse 1.8s ease-in-out infinite!important"
                 f"}}</style>"
             )
             continue
         elif estado == "pre_reservado_mio" or num in st.session_state.selected_tickets:
-            fondo, borde, color = "linear-gradient(145deg,#111827,#000000)", "#000000", "#FFFFFF"
+            fondo, borde, color = "linear-gradient(145deg,#6B7280,#374151)", "#4B5563", "#F9FAFB"
+            estilos.append(
+                f"<style>.st-key-btn_{num} button{{"
+                f"background:{fondo}!important;"
+                f"border-color:{borde}!important;"
+                f"color:{color}!important;"
+                f"opacity:.86!important;"
+                f"filter:grayscale(.20) saturate(.75)!important"
+                f"}}</style>"
+            )
+            continue
         else:
             continue
         estilos.append(f"<style>.st-key-btn_{num} button{{background:{fondo}!important;border-color:{borde}!important;color:{color}!important}}</style>")
