@@ -1923,7 +1923,19 @@ def procesar_retorno_pago(conn):
     if stripe_session_id:
         if confirmar_si_venta_ya_existe(conn, ext_ref):
             st.rerun()
-        pago = obtener_pago_stripe(stripe_session_id, ext_ref if ext_ref else None)
+
+        pago = None
+        stripe_session_id = limpiar_valor_id(stripe_session_id)
+
+        # Stripe Checkout debe regresar un ID tipo cs_live_... o cs_test_...
+        # Si por alguna razon llega un pi_..., se trata como PaymentIntent y no como Checkout Session.
+        if stripe_session_id.startswith("cs_"):
+            pago = obtener_pago_stripe(stripe_session_id, ext_ref if ext_ref else None)
+        elif stripe_session_id.startswith("pi_"):
+            pago = obtener_pago_stripe_por_payment_intent(stripe_session_id, ext_ref if ext_ref else None)
+        else:
+            st.session_state.ultimo_error_pago = "No fue posible validar el pago de Stripe. Intenta consultar tus boletos con tu correo."
+
         if pago:
             datos = finalizar_pago_confirmado_app(conn, pago, ext_ref)
             st.session_state.boletos_confirmados = datos
