@@ -109,6 +109,15 @@ SUPABASE_TTL_MAPA_SEGUNDOS = int(obtener_config("SUPABASE_TTL_MAPA_SEGUNDOS", "5
 COPIAR_SHEETS_DESDE_APP = obtener_config("COPIAR_SHEETS_DESDE_APP", "false").lower() in ["1", "true", "si", "yes", "on"]
 APP_PUBLIC_URL = obtener_config("APP_PUBLIC_URL", "")
 SUPABASE_SOLO_ESTADOS_ACTIVOS_MAPA = obtener_config("SUPABASE_SOLO_ESTADOS_ACTIVOS_MAPA", "true").lower() in ["1", "true", "si", "yes", "on"]
+VENTA_ACTIVA = obtener_config("VENTA_ACTIVA", "true").lower() in ["1", "true", "si", "yes", "on"]
+MENSAJE_RIFA_CERRADA = obtener_config(
+    "MENSAJE_RIFA_CERRADA",
+    "La venta de boletos ha finalizado. Gracias por participar."
+)
+MENSAJE_CONSULTA_CIERRE = obtener_config(
+    "MENSAJE_CONSULTA_CIERRE",
+    "Si ya realizaste tu pago, puedes consultar tus boletos en la pestaña Buscar mis Boletos / Verificar Pago."
+)
 
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if (MP_ACCESS_TOKEN and mercadopago is not None) else None
 if STRIPE_SECRET_KEY and stripe is not None:
@@ -686,6 +695,51 @@ def limpiar_checkout_pendiente():
     st.session_state.checkout_metodo_elegido = ""
 
 
+def limpiar_carrito_temporal_por_cierre():
+    """
+    Al cerrar la venta:
+    - elimina selecciones locales del carrito,
+    - oculta enlaces de pago nuevos,
+    - cancela reservas creadas en esta sesion solo si aun no se genero enlace de pago,
+    - mantiene webhooks activos para reflejar pagos ya procesados o en proceso.
+    """
+    try:
+        pre_reservas = obtener_pre_reservas_globales()
+        mi_sesion = limpiar_valor_id(st.session_state.get("session_id", ""))
+        for boleto, info in list(pre_reservas.items()):
+            if info.get("session_id") == mi_sesion:
+                del pre_reservas[boleto]
+    except Exception:
+        pass
+
+    checkout = st.session_state.get("checkout_pendiente")
+    ref = ""
+    if isinstance(checkout, dict):
+        ref = limpiar_valor_id(checkout.get("external_reference", ""))
+
+    # Si no hay enlace de pago generado, la reserva pendiente de esta sesion se libera.
+    # Si ya existe enlace de pago, no se cancela aqui para permitir que un pago ya iniciado se refleje por webhook.
+    hay_enlace_pago = bool(st.session_state.get("pago_generado_url") or st.session_state.get("stripe_pago_url"))
+    if ref and not hay_enlace_pago:
+        try:
+            cancelar_reserva_supabase_por_referencia(ref, motivo="CERRADO_RIFA")
+        except Exception:
+            pass
+
+    st.session_state.selected_tickets = []
+    st.session_state.pago_generado_url = None
+    st.session_state.stripe_pago_url = None
+    st.session_state.stripe_session_id = None
+    st.session_state.payment_provider = None
+    st.session_state.external_ref_activa = None
+    st.session_state.checkout_pendiente = None
+    st.session_state.checkout_metodo_elegido = ""
+    try:
+        limpiar_cache_mapa()
+    except Exception:
+        pass
+
+
 
 def alternar_boleto_mapa(numero_boleto: str):
     """Agrega o quita boletos del carrito.
@@ -1105,6 +1159,8 @@ def liberar_reservas_previas_mismo_cliente(df_r: pd.DataFrame, ordenes: List[Dic
 
 def registrar_reserva_cobro(conn: GSheetsConnection, ordenes: List[Dict[str, Any]]) -> Tuple[bool, str]:
     try:
+        if not VENTA_ACTIVA:
+            return False, MENSAJE_RIFA_CERRADA
         if not ordenes:
             return False, "No hay boletos para reservar."
         if supabase_activo():
@@ -1456,6 +1512,8 @@ def obtener_pago_mercadopago_por_payment_id(payment_id, external_reference_esper
 
 
 def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_boletos, monto_unitario, external_reference):
+    if not VENTA_ACTIVA:
+        raise ValueError(MENSAJE_RIFA_CERRADA)
     if not sdk:
         return "", ""
     base = normalizar_url(MP_RETURN_URL)
@@ -1483,6 +1541,8 @@ def crear_preferencia_mercado_pago(nombre, apellidos, correo, telefono, numeros_
 
 
 def crear_sesion_stripe(nombre, apellidos, correo, numeros_boletos, monto_unitario, external_reference):
+    if not VENTA_ACTIVA:
+        raise ValueError(MENSAJE_RIFA_CERRADA)
     if stripe is None:
         raise ValueError("La libreria stripe no esta instalada. Agrega stripe en requirements.txt.")
     if not STRIPE_SECRET_KEY:
@@ -1923,19 +1983,7 @@ def procesar_retorno_pago(conn):
     if stripe_session_id:
         if confirmar_si_venta_ya_existe(conn, ext_ref):
             st.rerun()
-
-        pago = None
-        stripe_session_id = limpiar_valor_id(stripe_session_id)
-
-        # Stripe Checkout debe regresar un ID tipo cs_live_... o cs_test_...
-        # Si por alguna razon llega un pi_..., se trata como PaymentIntent y no como Checkout Session.
-        if stripe_session_id.startswith("cs_"):
-            pago = obtener_pago_stripe(stripe_session_id, ext_ref if ext_ref else None)
-        elif stripe_session_id.startswith("pi_"):
-            pago = obtener_pago_stripe_por_payment_intent(stripe_session_id, ext_ref if ext_ref else None)
-        else:
-            st.session_state.ultimo_error_pago = "No fue posible validar el pago de Stripe. Intenta consultar tus boletos con tu correo."
-
+        pago = obtener_pago_stripe(stripe_session_id, ext_ref if ext_ref else None)
         if pago:
             datos = finalizar_pago_confirmado_app(conn, pago, ext_ref)
             st.session_state.boletos_confirmados = datos
@@ -2011,6 +2059,8 @@ def sincronizar_checkout_con_seleccion_local():
 
 def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[bool, str]:
     """Sincroniza todos los boletos del checkout antes de crear link de pago."""
+    if not VENTA_ACTIVA:
+        return False, MENSAJE_RIFA_CERRADA
     checkout = st.session_state.get("checkout_pendiente")
     if not isinstance(checkout, dict):
         return False, "No existe checkout pendiente."
@@ -2063,6 +2113,11 @@ def sincronizar_reserva_checkout_en_sheets(conn: GSheetsConnection) -> Tuple[boo
 
 
 def renderizar_checkout_pendiente(conn: GSheetsConnection):
+    if not VENTA_ACTIVA:
+        limpiar_carrito_temporal_por_cierre()
+        st.warning(MENSAJE_RIFA_CERRADA)
+        st.info(MENSAJE_CONSULTA_CIERRE)
+        return
     sincronizar_checkout_con_seleccion_local()
     checkout = st.session_state.get("checkout_pendiente")
     if not isinstance(checkout, dict) or not checkout.get("external_reference"):
@@ -2264,6 +2319,14 @@ def main():
                 limpiar_query_manteniendo_cid()
                 st.rerun()
             st.stop()
+
+        if not VENTA_ACTIVA:
+            limpiar_carrito_temporal_por_cierre()
+            st.warning(MENSAJE_RIFA_CERRADA)
+            st.info(MENSAJE_CONSULTA_CIERRE)
+            st.caption("La consulta de boletos permanece activa. Las notificaciones de pago pueden seguir actualizando compras ya procesadas.")
+            st.stop()
+
         col_mapa, col_form = st.columns([1.5, 1], gap="large")
         with col_mapa:
             st.subheader("🎫 Mapa de Disponibilidad")
@@ -2294,6 +2357,11 @@ def main():
                     telefono = st.text_input("WhatsApp (10 digitos):", max_chars=10)
                     st.write(f"**💰 Total a Pagar:** ${total_pagar:.2f} MXN")
                     if st.button("🔴 Confirmar y Elegir Metodo de Pago", type="primary", use_container_width=True, key="btn_confirmar_metodo_pago"):
+                        if not VENTA_ACTIVA:
+                            limpiar_carrito_temporal_por_cierre()
+                            st.warning(MENSAJE_RIFA_CERRADA)
+                            st.info(MENSAJE_CONSULTA_CIERRE)
+                            st.rerun()
                         asegurar_client_id_en_url()
                         pre = obtener_pre_reservas_globales()
                         ahora = datetime.now()
