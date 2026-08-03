@@ -1756,7 +1756,7 @@ def renderizar_mapa_interactivo():
         font-weight:900!important;
     }
 
-    /* Disponible -> Verde */
+    /* Disponible -> Verde. Este es el estilo base solo para boletos sin estado especial. */
     .st-key-mapa_boletos_grid div[class*="st-key-btn_"] button {
         background:linear-gradient(145deg,#86EFAC,#DCFCE7)!important;
         background-color:#DCFCE7!important;
@@ -1764,6 +1764,7 @@ def renderizar_mapa_interactivo():
         color:#064E3B!important;
         opacity:1!important;
         filter:none!important;
+        box-shadow:0 4px 10px rgba(22,163,74,.18)!important;
     }
 
     @keyframes lockPulse {
@@ -1775,25 +1776,30 @@ def renderizar_mapa_interactivo():
     """]
 
     for num, estado in estados.items():
+        selector = (
+            f".st-key-mapa_boletos_grid .st-key-btn_{num} button,"
+            f".st-key-mapa_boletos_grid .st-key-btn_{num} button:disabled,"
+            f".st-key-mapa_boletos_grid div[class*='st-key-btn_{num}'] button,"
+            f".st-key-mapa_boletos_grid div[class*='st-key-btn_{num}'] button:disabled"
+        )
+
         if estado == "vendido_db":
-            # Vendido -> Rojo fuerte
+            # Vendido -> Rojo
             estilos.append(
-                f"<style>"
-                f".st-key-btn_{num} button, .st-key-btn_{num} button:disabled{{"
+                f"<style>{selector}{{"
                 f"background:linear-gradient(145deg,#EF4444,#FECACA)!important;"
                 f"background-color:#FECACA!important;"
                 f"border-color:#DC2626!important;"
                 f"color:#7F1D1D!important;"
                 f"opacity:1!important;"
                 f"filter:none!important;"
-                f"box-shadow:0 6px 14px rgba(220,38,38,.25)!important;"
+                f"box-shadow:0 6px 14px rgba(220,38,38,.28)!important;"
                 f"}}</style>"
             )
         elif estado == "reservado_db":
-            # Reservado / validando -> Amarillo anaranjado con candado
+            # Reservado / validando -> Amarillo-anaranjado con candado
             estilos.append(
-                f"<style>"
-                f".st-key-btn_{num} button, .st-key-btn_{num} button:disabled{{"
+                f"<style>{selector}{{"
                 f"background:linear-gradient(145deg,#F97316,#FED7AA)!important;"
                 f"background-color:#FED7AA!important;"
                 f"border-color:#EA580C!important;"
@@ -1801,29 +1807,27 @@ def renderizar_mapa_interactivo():
                 f"opacity:1!important;"
                 f"filter:none!important;"
                 f"animation:lockPulse 1.8s ease-in-out infinite!important;"
-                f"box-shadow:0 6px 14px rgba(249,115,22,.28)!important;"
+                f"box-shadow:0 6px 14px rgba(249,115,22,.30)!important;"
                 f"}}</style>"
             )
         elif estado == "pre_reservado_otros":
             # En carrito de otro usuario -> Gris con candado
             estilos.append(
-                f"<style>"
-                f".st-key-btn_{num} button, .st-key-btn_{num} button:disabled{{"
+                f"<style>{selector}{{"
                 f"background:linear-gradient(145deg,#64748B,#CBD5E1)!important;"
                 f"background-color:#CBD5E1!important;"
                 f"border-color:#475569!important;"
                 f"color:#111827!important;"
                 f"opacity:1!important;"
-                f"filter:grayscale(.15) saturate(.65)!important;"
+                f"filter:grayscale(.15) saturate(.70)!important;"
                 f"animation:lockPulse 1.8s ease-in-out infinite!important;"
-                f"box-shadow:0 6px 14px rgba(71,85,105,.30)!important;"
+                f"box-shadow:0 6px 14px rgba(71,85,105,.32)!important;"
                 f"}}</style>"
             )
         elif estado == "pre_reservado_mio" or num in st.session_state.selected_tickets:
             # Seleccionado por el usuario -> Negro
             estilos.append(
-                f"<style>"
-                f".st-key-btn_{num} button, .st-key-btn_{num} button:disabled{{"
+                f"<style>{selector}{{"
                 f"background:linear-gradient(145deg,#111827,#000000)!important;"
                 f"background-color:#000000!important;"
                 f"border-color:#000000!important;"
