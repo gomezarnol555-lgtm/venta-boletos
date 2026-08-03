@@ -1752,53 +1752,88 @@ def renderizar_mapa_interactivo():
         min-height:58px!important;
         border-radius:14px!important;
         border-style:dashed!important;
-        border-width:1.8px!important;
+        border-width:2px!important;
         font-weight:900!important;
     }
+
+    /* Disponible -> Verde */
     .st-key-mapa_boletos_grid div[class*="st-key-btn_"] button {
-        background:linear-gradient(145deg,#D1FAE5,#F0FDF4)!important;
-        border-color:#10B981!important;
+        background:linear-gradient(145deg,#86EFAC,#DCFCE7)!important;
+        background-color:#DCFCE7!important;
+        border-color:#16A34A!important;
         color:#064E3B!important;
+        opacity:1!important;
+        filter:none!important;
     }
+
     @keyframes lockPulse {
-        0% { transform: scale(1); box-shadow: 0 3px 9px rgba(100,116,139,.16); }
-        50% { transform: scale(1.035); box-shadow: 0 8px 18px rgba(100,116,139,.28); }
-        100% { transform: scale(1); box-shadow: 0 3px 9px rgba(100,116,139,.16); }
+        0% { transform: scale(1); box-shadow: 0 3px 9px rgba(100,116,139,.18); }
+        50% { transform: scale(1.035); box-shadow: 0 8px 20px rgba(100,116,139,.34); }
+        100% { transform: scale(1); box-shadow: 0 3px 9px rgba(100,116,139,.18); }
     }
     </style>
     """]
+
     for num, estado in estados.items():
         if estado == "vendido_db":
-            fondo, borde, color = "linear-gradient(145deg,#FCA5A5,#FEE2E2)", "#EF4444", "#7F1D1D"
+            # Vendido -> Rojo fuerte
+            estilos.append(
+                f"<style>"
+                f".st-key-btn_{num} button, .st-key-btn_{num} button:disabled{{"
+                f"background:linear-gradient(145deg,#EF4444,#FECACA)!important;"
+                f"background-color:#FECACA!important;"
+                f"border-color:#DC2626!important;"
+                f"color:#7F1D1D!important;"
+                f"opacity:1!important;"
+                f"filter:none!important;"
+                f"box-shadow:0 6px 14px rgba(220,38,38,.25)!important;"
+                f"}}</style>"
+            )
         elif estado == "reservado_db":
-            fondo, borde, color = "linear-gradient(145deg,#FDBA74,#FFF7ED)", "#F59E0B", "#7C2D12"
+            # Reservado / validando -> Amarillo anaranjado con candado
             estilos.append(
-                f"<style>.st-key-btn_{num} button{{"
-                f"background:{fondo}!important;"
-                f"border-color:{borde}!important;"
-                f"color:{color}!important;"
-                f"animation:lockPulse 1.8s ease-in-out infinite!important"
+                f"<style>"
+                f".st-key-btn_{num} button, .st-key-btn_{num} button:disabled{{"
+                f"background:linear-gradient(145deg,#F97316,#FED7AA)!important;"
+                f"background-color:#FED7AA!important;"
+                f"border-color:#EA580C!important;"
+                f"color:#7C2D12!important;"
+                f"opacity:1!important;"
+                f"filter:none!important;"
+                f"animation:lockPulse 1.8s ease-in-out infinite!important;"
+                f"box-shadow:0 6px 14px rgba(249,115,22,.28)!important;"
                 f"}}</style>"
             )
-            continue
         elif estado == "pre_reservado_otros":
-            fondo, borde, color = "linear-gradient(145deg,#94A3B8,#E2E8F0)", "#475569", "#1F2937"
+            # En carrito de otro usuario -> Gris con candado
             estilos.append(
-                f"<style>.st-key-btn_{num} button{{"
-                f"background:{fondo}!important;"
-                f"border-color:{borde}!important;"
-                f"color:{color}!important;"
-                f"opacity:.78!important;"
-                f"filter:grayscale(.25) saturate(.75)!important;"
-                f"animation:lockPulse 1.8s ease-in-out infinite!important"
+                f"<style>"
+                f".st-key-btn_{num} button, .st-key-btn_{num} button:disabled{{"
+                f"background:linear-gradient(145deg,#64748B,#CBD5E1)!important;"
+                f"background-color:#CBD5E1!important;"
+                f"border-color:#475569!important;"
+                f"color:#111827!important;"
+                f"opacity:1!important;"
+                f"filter:grayscale(.15) saturate(.65)!important;"
+                f"animation:lockPulse 1.8s ease-in-out infinite!important;"
+                f"box-shadow:0 6px 14px rgba(71,85,105,.30)!important;"
                 f"}}</style>"
             )
-            continue
         elif estado == "pre_reservado_mio" or num in st.session_state.selected_tickets:
-            fondo, borde, color = "linear-gradient(145deg,#111827,#000000)", "#000000", "#FFFFFF"
-        else:
-            continue
-        estilos.append(f"<style>.st-key-btn_{num} button{{background:{fondo}!important;border-color:{borde}!important;color:{color}!important}}</style>")
+            # Seleccionado por el usuario -> Negro
+            estilos.append(
+                f"<style>"
+                f".st-key-btn_{num} button, .st-key-btn_{num} button:disabled{{"
+                f"background:linear-gradient(145deg,#111827,#000000)!important;"
+                f"background-color:#000000!important;"
+                f"border-color:#000000!important;"
+                f"color:#FFFFFF!important;"
+                f"opacity:1!important;"
+                f"filter:none!important;"
+                f"box-shadow:0 7px 16px rgba(0,0,0,.35)!important;"
+                f"}}</style>"
+            )
+
     st.markdown("\n".join(estilos), unsafe_allow_html=True)
     with st.container(key="mapa_boletos_grid"):
         for fila in range(FILAS_MAPA):
@@ -1825,7 +1860,12 @@ def renderizar_mapa_interactivo():
                             help="Reservado / validando"
                         )
                     elif estado == "vendido_db":
-                        st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Vendido")
+                        st.button(
+                            f"🎟️\n{num}",
+                            disabled=True,
+                            key=f"btn_{num}",
+                            help="Vendido"
+                        )
                     else:
                         seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
                         st.button(
