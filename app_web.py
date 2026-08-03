@@ -1772,6 +1772,15 @@ def renderizar_mapa_interactivo():
             fondo, borde, color = "linear-gradient(145deg,#FECACA,#FEF2F2)", "#EF4444", "#7F1D1D"
         elif estado == "reservado_db":
             fondo, borde, color = "linear-gradient(145deg,#FED7AA,#FFF7ED)", "#F59E0B", "#7C2D12"
+            estilos.append(
+                f"<style>.st-key-btn_{num} button{{"
+                f"background:{fondo}!important;"
+                f"border-color:{borde}!important;"
+                f"color:{color}!important;"
+                f"animation:lockPulse 1.8s ease-in-out infinite!important"
+                f"}}</style>"
+            )
+            continue
         elif estado == "pre_reservado_otros":
             fondo, borde, color = "linear-gradient(145deg,#E2E8F0,#F8FAFC)", "#64748B", "#334155"
             estilos.append(
@@ -1806,8 +1815,15 @@ def renderizar_mapa_interactivo():
                             key=f"btn_{num}",
                             help="En carrito de otro usuario"
                         )
-                    elif estado in ["vendido_db", "reservado_db"]:
-                        st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help=estado)
+                    elif estado == "reservado_db":
+                        st.button(
+                            f"🔒\n{num}",
+                            disabled=True,
+                            key=f"btn_{num}",
+                            help="Reservado / validando"
+                        )
+                    elif estado == "vendido_db":
+                        st.button(f"🎟️\n{num}", disabled=True, key=f"btn_{num}", help="Vendido")
                     else:
                         seleccionado = estado == "pre_reservado_mio" or num in st.session_state.selected_tickets
                         st.button(
