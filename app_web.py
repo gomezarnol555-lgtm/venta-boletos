@@ -1769,47 +1769,33 @@ def renderizar_mapa_interactivo():
     """]
     for num, estado in estados.items():
         if estado == "vendido_db":
-            fondo, borde, color = "linear-gradient(145deg,#FECACA,#FEF2F2)", "#EF4444", "#7F1D1D"
+            fondo, borde, color = "linear-gradient(145deg,#FCA5A5,#FEE2E2)", "#EF4444", "#7F1D1D"
         elif estado == "reservado_db":
-            fondo, borde, color = "linear-gradient(145deg,#CBD5E1,#F1F5F9)", "#64748B", "#334155"
+            fondo, borde, color = "linear-gradient(145deg,#FDBA74,#FFF7ED)", "#F59E0B", "#7C2D12"
             estilos.append(
                 f"<style>.st-key-btn_{num} button{{"
                 f"background:{fondo}!important;"
                 f"border-color:{borde}!important;"
                 f"color:{color}!important;"
-                f"opacity:.72!important;"
-                f"filter:grayscale(.35) saturate(.65)!important;"
-                f"opacity:.72!important;"
-                f"filter:grayscale(.35) saturate(.65)!important;"
                 f"animation:lockPulse 1.8s ease-in-out infinite!important"
                 f"}}</style>"
             )
             continue
         elif estado == "pre_reservado_otros":
-            fondo, borde, color = "linear-gradient(145deg,#CBD5E1,#F8FAFC)", "#64748B", "#334155"
+            fondo, borde, color = "linear-gradient(145deg,#94A3B8,#E2E8F0)", "#475569", "#1F2937"
             estilos.append(
                 f"<style>.st-key-btn_{num} button{{"
                 f"background:{fondo}!important;"
                 f"border-color:{borde}!important;"
                 f"color:{color}!important;"
-                f"opacity:.72!important;"
-                f"filter:grayscale(.35) saturate(.65)!important;"
+                f"opacity:.78!important;"
+                f"filter:grayscale(.25) saturate(.75)!important;"
                 f"animation:lockPulse 1.8s ease-in-out infinite!important"
                 f"}}</style>"
             )
             continue
         elif estado == "pre_reservado_mio" or num in st.session_state.selected_tickets:
-            fondo, borde, color = "linear-gradient(145deg,#6B7280,#374151)", "#4B5563", "#F9FAFB"
-            estilos.append(
-                f"<style>.st-key-btn_{num} button{{"
-                f"background:{fondo}!important;"
-                f"border-color:{borde}!important;"
-                f"color:{color}!important;"
-                f"opacity:.86!important;"
-                f"filter:grayscale(.20) saturate(.75)!important"
-                f"}}</style>"
-            )
-            continue
+            fondo, borde, color = "linear-gradient(145deg,#111827,#000000)", "#000000", "#FFFFFF"
         else:
             continue
         estilos.append(f"<style>.st-key-btn_{num} button{{background:{fondo}!important;border-color:{borde}!important;color:{color}!important}}</style>")
