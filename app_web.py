@@ -1771,7 +1771,7 @@ def renderizar_mapa_interactivo():
         if estado == "vendido_db":
             fondo, borde, color = "linear-gradient(145deg,#FECACA,#FEF2F2)", "#EF4444", "#7F1D1D"
         elif estado == "reservado_db":
-            fondo, borde, color = "linear-gradient(145deg,#FED7AA,#FFF7ED)", "#F59E0B", "#7C2D12"
+            fondo, borde, color = "linear-gradient(145deg,#CBD5E1,#F1F5F9)", "#64748B", "#334155"
             estilos.append(
                 f"<style>.st-key-btn_{num} button{{"
                 f"background:{fondo}!important;"
@@ -1782,7 +1782,7 @@ def renderizar_mapa_interactivo():
             )
             continue
         elif estado == "pre_reservado_otros":
-            fondo, borde, color = "linear-gradient(145deg,#E2E8F0,#F8FAFC)", "#64748B", "#334155"
+            fondo, borde, color = "linear-gradient(145deg,#CBD5E1,#F8FAFC)", "#64748B", "#334155"
             estilos.append(
                 f"<style>.st-key-btn_{num} button{{"
                 f"background:{fondo}!important;"
