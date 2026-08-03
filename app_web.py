@@ -2136,9 +2136,6 @@ def main():
     conn = st.connection("gsheets", type=GSheetsConnection)
     procesar_retorno_pago(conn)
     st.title(f"🎟️ Plataforma de Boletos - {NOMBRE_EVENTO}")
-    link_nuevo_carrito = obtener_link_publico_nuevo_carrito()
-    if link_nuevo_carrito:
-        st.caption("Para compartir la app, usa el enlace publico con ?new=1 para iniciar una compra nueva.")
     tab1, tab2 = st.tabs(["🛒 Comprar Boletos", "🎫 Buscar mis Boletos / Verificar Pago"])
     with tab2:
         st.markdown("### 🎫 Consulta tus boletos")
