@@ -2183,7 +2183,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
         )
 
         acepta_politicas_compra = st.checkbox(
-            "He revisado mis datos y boletos seleccionados. Acepto la política de compra y condiciones de participación",
+            "He revisado mis datos y boletos seleccionados. Acepto las políticas de compra y las condiciones de participación",
             key=f"chk_acepta_politicas_compra_{ref_checkout}",
         )
 
