@@ -2178,7 +2178,6 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
         st.markdown("### Condiciones antes de pagar")
         st.info(
             "Antes de continuar, verifica que tu nombre, correo, teléfono y boletos seleccionados sean correctos.\n\n"
-            "Al completar el pago, aceptas que los boletos quedarán registrados para participar en el sorteo.\n\n"
             "Una vez confirmado el pago, los cambios, cancelaciones o reembolsos quedarán sujetos a revisión durante el evento.\n\n"
             "Después del cierre de ventas o de realizado el evento, no se realizarán reembolsos por cambio de decisión o por no resultar ganador."
         )
