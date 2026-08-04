@@ -2177,9 +2177,9 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
 
         st.markdown("### Condiciones antes de pagar")
         st.info(
-            "Antes de continuar, verifica que tu nombre, correo, teléfono y boletos seleccionados sean correctos.\n\n"
-            "Una vez confirmado el pago, los cambios, cancelaciones o reembolsos quedarán sujetos a revisión.\n\n"
-            "Después del cierre de ventas o de realizado el evento, no se realizarán reembolsos por cambio de decisión o por no resultar ganador."
+            "Antes de continuar, verifica que tus datos y boletos sean correctos.\n\n"
+            "Una vez confirmado el pago, cualquier cambio, cancelación o reembolso quedará sujeto a revisión.\n\n"
+            "Después del cierre de ventas o del evento, no se realizarán reembolsos por cambio de decisión o por no resultar ganador."
         )
 
         acepta_politicas_compra = st.checkbox(
