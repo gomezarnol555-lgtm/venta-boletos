@@ -2171,11 +2171,28 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
 
     if not metodo:
         st.warning("Selecciona un metodo de pago para activar Realizar pago.")
+        acepta_politicas_compra = False
     else:
         st.info(f"Metodo seleccionado: {metodo}")
 
+        st.markdown("### Condiciones antes de pagar")
+        st.info(
+            "Antes de continuar con el pago, verifica que tu nombre, correo, teléfono y boletos seleccionados sean correctos.\n\n"
+            "Al completar el pago, aceptas que los boletos quedarán registrados para participar en el sorteo. "
+            "Una vez confirmado el pago, los cambios, cancelaciones o reembolsos estarán sujetos a revisión.\n\n"
+            "Después del cierre de ventas o de realizado el evento, no se realizarán reembolsos por cambio de decisión o por no resultar ganador."
+        )
+
+        acepta_politicas_compra = st.checkbox(
+            "He revisado mis datos y boletos seleccionados. Acepto las política de compra y condiciones de participación",
+            key=f"chk_acepta_politicas_compra_{ref_checkout}",
+        )
+
+        if not acepta_politicas_compra:
+            st.warning("Para continuar con el pago, confirma que revisaste tus datos y aceptas las condiciones de participación.")
+
     url_pago = ""
-    if metodo:
+    if metodo and acepta_politicas_compra:
         if metodo == "Mercado Pago":
             url_pago = st.session_state.get("pago_generado_url") or ""
         elif metodo == "Stripe":
@@ -2240,7 +2257,7 @@ def renderizar_checkout_pendiente(conn: GSheetsConnection):
                         st.error("No fue posible preparar Stripe. " + " | ".join(errores))
                         return
 
-    if url_pago:
+    if url_pago and acepta_politicas_compra:
         st.markdown('<div class="st-key-btn_realizar_pago_directo">', unsafe_allow_html=True)
         st.link_button("✅ Realizar pago", url=url_pago, type="primary", use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
