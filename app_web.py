@@ -54,7 +54,7 @@ def obtener_config_inicial(nombre: str, default: str = "") -> str:
 # Nota: este valor manda sobre Streamlit Secrets para evitar desfases.
 # ============================================================
 TOTAL_BOLETOS = 100
-PRECIO_BOLETO = 30.00
+PRECIO_BOLETO = 25.00
 NOMBRE_EVENTO = "Audifonos Reno Series"
 FECHA_VIGENCIA_BOLETO = "21/08/2026"
 MENSAJE_GENERAL_BOLETO = (
